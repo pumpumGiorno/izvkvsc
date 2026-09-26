@@ -1,0 +1,19 @@
+<!doctype html>
+<html><head><meta charset="utf-8"></head><body>
+<div id="list"></div>
+<script>
+const T = [
+  [1, 5, "", "Группа крови", "Кино", 285],
+  [2, 5, "", "Starboy", "The Weeknd feat. Daft Punk", 230],
+  [3, 5, "", "Rock &amp; Roll", "Led Zeppelin", 220],
+  [4, 5, "", "Bad Romance", "Lady Gaga", 294, 0,0,"",{}, 0,"","[]","",0,0, "Skrillex Remix"],
+  [5, 5, "", "Хочешь?", "Земфира", 225],
+];
+const list = document.getElementById("list");
+for (const t of T) {
+  const el = document.createElement("div");
+  el.setAttribute("data-audio", JSON.stringify(t));
+  el.textContent = "▶";
+  list.appendChild(el);
+}
+</script></body></html>

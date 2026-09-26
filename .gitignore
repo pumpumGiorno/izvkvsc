@@ -1,0 +1,17 @@
+# Секреты
+.env
+
+# Личные данные и результаты прогона
+tracks.txt
+state.json
+.state-*.json
+report.csv
+vk2sc.log
+.cache/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/

@@ -1,0 +1,58 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Музыка</title>
+<style>.audio_row{height:48px;border-bottom:1px solid #eee}</style></head>
+<body>
+<!-- Плеер сверху: его строку брать нельзя -->
+<div class="top_audio_player"><div class="audio_row"><div class="audio_row__performers"><a>Плеер</a></div><span class="audio_row__title_inner">Сейчас играет</span></div></div>
+
+<div class="CatalogBlock" id="recent"><h2 class="CatalogBlock__title">Недавно прослушанные</h2>
+  <div class="rows"></div></div>
+
+<div class="CatalogBlock" id="mine"><h2 class="CatalogBlock__title">Мои треки</h2>
+  <div class="rows"></div>
+  <div class="CatalogBlock__autoListLoader">Загрузка…</div>
+</div>
+
+<script>
+const MY = [];
+for (let i = 1; i <= 50; i++) MY.push({a: [`Исполнитель ${i}`], t: `Песня ${i}`, d: 120 + i});
+MY[1] = {a: ["Miyagi", "Andy Panda"], t: "Kosandra", d: 216};
+MY[2] = {a: ["Lady Gaga"], t: "Bad Romance", sub: "Skrillex Remix", d: 294};
+MY[3] = {a: ["Ёлка"], t: "Прованс", d: 211};
+MY[4] = {a: ["Imagine Dragons"], t: "Believer", d: 204};
+MY[5] = {a: ["Imagine Dragons"], t: "Believer", d: 204};  // тот же трек добавлен дважды (разные id)
+
+function row(t, id) {
+  const el = document.createElement("div");
+  el.className = "audio_row _audio_row audio_row_with_cover";
+  el.setAttribute("data-full-id", "100_" + id);
+  const perf = t.a.map(a => `<a href="/artist/${encodeURIComponent(a)}">${a}</a>`).join(", ");
+  el.innerHTML = `<div class="audio_row__inner"><div class="audio_row__performer_title">
+      <div class="audio_row__performers">${perf}</div>
+      <div class="audio_row__title _audio_row__title"><span class="audio_row__title_inner _audio_row__title_inner">${t.t}</span>
+      <span class="audio_row__title_inner_subtitle">${t.sub || ""}</span></div></div>
+      <div class="audio_row__info"><div class="audio_row__duration">${Math.floor(t.d/60)}:${String(t.d%60).padStart(2,"0")}</div></div></div>`;
+  return el;
+}
+const recent = document.querySelector("#recent .rows");
+[{a:["Другой"], t:"Недавний 1", d: 100}, {a:["Другой"], t:"Недавний 2", d: 101}, {a:["Другой"], t:"Недавний 3", d: 102}]
+  .forEach((t, i) => recent.appendChild(row(t, 900 + i)));
+
+const mine = document.querySelector("#mine .rows");
+const loader = document.querySelector(".CatalogBlock__autoListLoader");
+let shown = 0, loading = false;
+function more() {
+  const next = Math.min(shown + 20, MY.length);
+  for (; shown < next; shown++) mine.appendChild(row(MY[shown], shown + 1));
+  if (shown >= MY.length) loader.style.display = "none";
+}
+more();
+window.addEventListener("scroll", () => {
+  if (loading || shown >= MY.length) return;
+  if (window.innerHeight + window.scrollY >= document.body.scrollHeight - 200) {
+    loading = true;
+    setTimeout(() => { more(); loading = false; }, 300);  // имитация сетевой подгрузки
+  }
+});
+</script>
+</body></html>
