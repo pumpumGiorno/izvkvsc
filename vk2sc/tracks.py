@@ -19,6 +19,23 @@ from .normalize import fold
 _SEPARATORS = (" — ", " – ", " - ", "—", "–")
 _DURATION_RE = re.compile(r"(?:\t+|\s+\|\s*)((?:\d{1,2}:)?\d{1,2}:\d{2})\s*$")
 
+# Бейдж битрейта вместо названия («320», «~128», «256 kbps»): так бывает, когда расширение
+# браузера вставляет его в строку трека и экспорт из VK берёт бейдж за название.
+BITRATE_TITLE_RE = re.compile(r"^~?\s?\d{2,3}(\s*(?:kbps|kbit/s|kb/s|кбит/с|кбит))?$", re.IGNORECASE)
+# Число без «~» и «kbps» считаем битрейтом, только если это стандартное значение:
+# «Arctic Monkeys — 505» и «Taylor Swift — 22» — настоящие песни.
+_STANDARD_BITRATES = {32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320}
+
+
+def is_bitrate_title(title: str) -> bool:
+    text = title.strip()
+    m = BITRATE_TITLE_RE.match(text)
+    if not m:
+        return False
+    if text.startswith("~") or m.group(1):
+        return True
+    return int(text) in _STANDARD_BITRATES
+
 
 class TracksFileError(Exception):
     pass
@@ -35,6 +52,11 @@ class Track:
     def display(self) -> str:
         text = f"{self.artist} — {self.title}"
         return f"{text} [{format_duration(self.duration)}]" if self.duration else text
+
+    @property
+    def broken_title(self) -> bool:
+        """Вместо названия битрейт — искать такой трек бессмысленно."""
+        return is_bitrate_title(self.title)
 
     def base_key(self) -> str:
         """Ключ для state.json. Не зависит от номера строки: файл можно дополнять."""

@@ -5,7 +5,7 @@ const fs = require("fs");
 const { chromium } = require("playwright");
 
 const ROOT = path.resolve(__dirname, "..", "..");
-const SCRIPT = path.join(ROOT, "vk_export.js");
+const SCRIPT = process.env.VK2SC_SCRIPT || path.join(ROOT, "vk_export.js");
 const FIXTURES = path.join(__dirname, "fixtures");
 
 (async () => {
@@ -13,7 +13,8 @@ const FIXTURES = path.join(__dirname, "fixtures");
   if (process.env.VK2SC_CHROMIUM) launchOpts.executablePath = process.env.VK2SC_CHROMIUM;
   const browser = await chromium.launch(launchOpts);
   const results = {};
-  for (const name of fs.readdirSync(FIXTURES).filter((f) => f.endsWith(".html")).sort()) {
+  const only = process.env.VK2SC_ONLY ? process.env.VK2SC_ONLY.split(",") : null;
+  for (const name of fs.readdirSync(FIXTURES).filter((f) => f.endsWith(".html") && (!only || only.includes(f))).sort()) {
     const context = await browser.newContext({ acceptDownloads: true });
     const page = await context.newPage();
     const dialogs = [];

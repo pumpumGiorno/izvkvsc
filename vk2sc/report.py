@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from .matching import Candidate
-from .state import AUTO, MANUAL, NOT_FOUND, PENDING, SKIPPED, State
+from .state import AUTO, BROKEN, MANUAL, NOT_FOUND, PENDING, SKIPPED, State
 from .tracks import Track, format_duration
 
 HEADER = ["Трек из VK", "Найдено в SoundCloud", "Ссылка", "Уверенность", "Статус"]
@@ -23,6 +23,7 @@ class Summary:
     skipped: int = 0
     not_found: int = 0
     pending: int = 0
+    broken: int = 0
     duplicates: int = 0
     unprocessed: int = 0
     rows: list = field(default_factory=list)
@@ -75,6 +76,9 @@ def build(tracks: list[Track], keys: list[str], state: State, dry_run: bool,
             elif st == PENDING:
                 status = "ждёт ручного выбора"
                 s.pending += 1
+            elif st == BROKEN:
+                status = "битое название"
+                s.broken += 1
             else:
                 status = st
         s.rows.append([track.display, found, url, conf, status])
@@ -108,6 +112,8 @@ def print_summary(summary: Summary, dry_run: bool, report_path: Path, out=print)
     out(f"Не найдено:            {summary.not_found}")
     if summary.pending:
         out(f"Ждут ручного выбора:   {summary.pending}")
+    if summary.broken:
+        out(f"Битые названия:        {summary.broken} (исправьте их в tracks.txt)")
     if summary.duplicates:
         out(f"Дубликаты:             {summary.duplicates}")
     if summary.unprocessed:

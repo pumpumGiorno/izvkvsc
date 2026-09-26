@@ -1,0 +1,71 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Музыка</title></head>
+<body>
+<!-- Повторяет вёрстку новой VK Музыки (vk.com/music/…) с расширением, которое вставляет
+     бейдж битрейта (vmsaudioRow__bitrate) и размер файла в каждую строку. -->
+<div data-testid="TopAudioPlayer"><div data-testid="TopAudioPlayer_Title">Сейчас играет — Кто-то</div></div>
+<div data-testid="AudioPage_PlayerBlock"><div data-testid="AudioPlayerBlock_AudioTitle">Плеер</div>
+  <a href="/artist/1" data-testid="AudioPlayerBlock_Authors">Плеер</a><span>0:42</span></div>
+<div data-testid="AudioCatalog_BlockMusicAudiosList" id="list"></div>
+<script>
+// title — innerHTML ссылки MusicTrackRow_Title (null — ссылки нет), authors — список исполнителей.
+const T = [
+  {title: 'BUSTDOWN<span class="vkit-1MRRxA"></span>', authors: ["@ФакШиза"], d: "1:13", badge: "320"},
+  {title: 'market deathmatch<span class="vkit-1MRRxA"></span>', authors: ["королевский XVII"], d: "1:55", badge: "320"},
+  {title: 'Have You Ever Been Mellow <span class="vkit-1MRRxA">Flamman &amp; Abraxas Radio Mix</span>', authors: ["Party Animals"], d: "3:05", badge: "320"},
+  {title: 'Song', authors: ["elyaplugg!", "huzzy b"], d: "2:08", badge: "320"},
+  // бейдж внутри самой ссылки с названием
+  {title: 'Fading<span class="vmsaudioRow__bitrate--HWOsS">~128</span>', authors: ["CLONNEX"], d: "1:54"},
+  // бейдж просто текстом в конце названия
+  {title: 'Night Drive ~192', authors: ["emothug"], d: "0:52"},
+  // настоящее название из цифр — не битрейт
+  {title: '22', authors: ["Taylor Swift"], d: "3:52", badge: "256 kbps", quality: "HQ"},
+  {title: 'Ночь', authors: ["Mirèle", "ONDA ANDAR"], d: "2:30", badge: "320"},
+  // строка без названия: её в файле быть не должно, но это < 20% — файл сохраняется
+  {title: null, authors: ["Akira Yamaoka"], d: "5:05", badge: "320"},
+  // исполнитель из цифр (группа 112) — не бейдж
+  {title: 'Cupid', authors: ["112"], d: "4:07", badge: "320"},
+  // название из цифр, совпадающее с битрейтом: берётся как есть, дальше его пометит vk2sc
+  {title: '128', authors: ["Some Band"], d: "3:00", badge: "320"},
+  // название дорисовывается позже (на втором событии scroll), строка уже собрана с пустым
+  {title: '', authors: ["Lazy Loader"], d: "2:22", badge: "320", lazy: true},
+];
+for (let i = 1; i <= 10; i++) T.push({title: `Track ${i}`, authors: [`Artist ${i}`], d: `2:${String(10 + i).padStart(2, "0")}`, badge: "~192"});
+
+const list = document.getElementById("list");
+T.forEach((t, i) => {
+  const id = 456240354 - i;
+  const authors = t.authors.map((a, n) =>
+    `<span class="vkit-UKXkWe"><a class="vkit-b0dQw7 vkuiLink__host" href="/artist/${1000 + i * 10 + n}" data-testid="MusicTrackRow_Authors">` +
+    `<div class="vkuiFlex__host"><div class="vkit-ewZ0L2 vkit-VbEObC vkit-5ara8E">${a}</div></div></a></span>`).join(", ");
+  const title = t.title === null ? "" :
+    `<span class="vkit-UKXkWe"><a class="vkit-b0dQw7 vkuiLink__host" href="/audio-2001_${id}" data-testid="MusicTrackRow_Title">${t.title}</a></span>`;
+  const el = document.createElement("div");
+  if (t.lazy) el.id = "lazy";
+  el.setAttribute("data-sortable-id", id);
+  el.className = "AudioCellCompositeRowsLayout__root--fdasP";
+  el.innerHTML =
+    `<div class="vkit-Z8uV8k vkuiRootComponent__host" data-audio-id="589332316_${id}" data-testentitytag="audio">` +
+    `<div class="vkit-FrFeNQ" data-testid="MusicTrackRow">` +
+    `<div class="vkit-JQxgnv" role="button" aria-label="Начать прослушивание" data-testid="audiorow-tappable"><span aria-hidden="true" class="vkuiTappable__stateLayer"></span></div>` +
+    `<div class="vkit-xtRmV8"><div class="vkit-WgBZg4" data-testid="MusicTrackRow_PlaybackControls"><img alt="" width="40" height="40">` +
+    `<svg aria-hidden="true" width="20" height="20"><path d="M1 1"></path></svg></div>` +
+    `<div class="vkit-zm1fLg"><div data-testid="MusicTrackRow_Info"><div class="vkit-bC5yeH">` +
+    `<div class="vkuiFlex__host">${title}</div>` +
+    `<div class="vkit-ewZ0L2 vkuiFootnote__host">${authors}</div>` +
+    `</div></div></div></div>` +
+    `<div class="vkit-dur"><h4 class="vkit-44NTKU vkuiHeadline__level2" data-testid="MusicTrackRow_Duration">${t.d}</h4></div>` +
+    (t.badge ? `<span class="vmsaudioRow__bitrate--HWOsS">${t.badge}</span>` : "") +
+    (t.quality ? `<span class="vms-q">${t.quality}</span>` : "") +
+    `<div data-testid="audiorow-actions"><span class="vmsDownloadAudioButton__size--BbZTc">2.80 МБ</span>` +
+    `<div data-testid="MusicAudio_OpenSnippet"><span class="vkuiVisuallyHidden__host">Открыть сниппет</span></div>` +
+    `<div data-testid="MusicAudio_ToggleOwning"><span class="vkuiVisuallyHidden__host">Удалить из моей музыки</span></div></div>` +
+    `</div></div>`;
+  list.appendChild(el);
+});
+let scrolls = 0;
+window.addEventListener("scroll", () => {
+  if (++scrolls === 2) document.querySelector('#lazy [data-testid="MusicTrackRow_Title"]').textContent = "Late Title";
+});
+</script>
+</body></html>

@@ -410,3 +410,103 @@ def test_report_cells_cannot_become_excel_formulas(workdir):
     row = read_report(workdir / "report.csv")[1]
     assert row[0].startswith("'=cmd")
     assert row[1].startswith("'@SUM")
+
+
+BROKEN_LIST = [
+    "@ФакШиза — 320 | 1:13",
+    "CLONNEX — ~128 | 1:54",
+    "emothug — 256 kbps | 0:52",
+    "Imagine Dragons — Believer | 3:24",
+    "Arctic Monkeys — 505",
+]
+
+
+def test_broken_titles_are_not_searched_and_reported(workdir):
+    write_tracks(workdir / "tracks.txt", BROKEN_LIST)
+    client = FakeClient()
+    code, out = run(["--dry-run"], client)
+    assert code == 0
+    # Ни поиска по «320», ни поиска по одному исполнителю.
+    assert not any("ФакШиза" in q or "CLONNEX" in q or "emothug" in q for q in client.searches)
+    assert any("Believer" in q for q in client.searches)
+    assert any("505" in q for q in client.searches)  # настоящая песня ищется как обычно
+    assert "битым названием" in out and "строки 1, 2, 3" in out
+    assert "Битые названия:        3" in out
+    rows = read_report(workdir / "report.csv")[1:]
+    assert [r[4] for r in rows[:3]] == ["битое название"] * 3
+    assert rows[0][1] == "" and rows[0][2] == ""  # ничего не «нашлось»
+    assert rows[3][4] == "будет добавлен"
+
+
+def test_stale_match_for_broken_title_is_overridden_and_not_added(workdir, monkeypatch):
+    """Старый state.json мог содержать «совпадение» для «320» — оно не должно попасть в плейлист."""
+    write_tracks(workdir / "tracks.txt", BROKEN_LIST[:1] + BROKEN_LIST[3:4])
+    stale = {
+        "version": 1,
+        "playlists": [],
+        "pending_create": None,
+        "tracks": {
+            "@факшиза — 320 #1": {
+                "source": "@ФакШиза — 320", "status": "auto", "queries": ["@ФакШиза 320"],
+                "match": {"id": 3, "title": "Bad Romance (Skrillex Remix)", "username": "Lady Gaga",
+                          "url": "u", "score": 90},
+                "candidates": [],
+            }
+        },
+    }
+    (workdir / "state.json").write_text(json.dumps(stale, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("SOUNDCLOUD_OAUTH_TOKEN", "secret-token-value")
+    client = FakeClient()
+    code, _ = run(["--title", "Из VK"], client, interactive=True, inputs=Inputs("y"))
+    assert code == 0
+    assert client.created == [("Из VK", [1], "private")]
+    state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
+    assert state["tracks"]["@факшиза — 320 #1"]["status"] == "broken_title"
+    assert state["tracks"]["@факшиза — 320 #1"]["match"] is None
+
+    again = FakeClient()
+    run(["--dry-run"], again, interactive=True, inputs=Inputs())
+    assert again.searches == []  # битое название не ищется и без --review не переспрашивается
+
+    # В --review можно найти такой трек вручную; Enter оставляет «битое название» без поиска.
+    review = FakeClient()
+    run(["--dry-run", "--review"], review, interactive=True, inputs=Inputs(""))
+    assert review.searches == []
+    state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
+    assert state["tracks"]["@факшиза — 320 #1"]["status"] == "broken_title"
+
+
+def test_real_song_named_like_bitrate_can_be_chosen_manually_and_is_kept(workdir):
+    write_tracks(workdir / "tracks.txt", ["Some Band — 128"])
+    run(["--dry-run"], FakeClient())
+    client = FakeClient(catalog=[sc_track(7, "128", "Some Band", 200)])
+
+    class ByQuery(FakeClient):
+        def search_tracks(self, query, limit=20):
+            self.searches.append(query)
+            return self.catalog
+
+    review = ByQuery(catalog=client.catalog)
+    run(["--dry-run", "--review"], review, interactive=True, inputs=Inputs("Some Band 128", "1"))
+    assert review.searches == ["Some Band 128"]  # только запрос, введённый вручную
+    state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
+    assert state["tracks"]["some band — 128 #1"]["status"] == "manual"
+
+    later = FakeClient()
+    run(["--dry-run"], later)
+    state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
+    assert state["tracks"]["some band — 128 #1"]["status"] == "manual" and later.searches == []
+
+
+def test_title_made_only_of_noise_is_not_searched_by_artist_alone():
+    from vk2sc.cli import build_queries
+    from vk2sc.tracks import Track
+
+    queries = build_queries(Track("Imagine Dragons", "(Official Audio)"))
+    assert all(q.strip() != "Imagine Dragons" for q in queries)
+
+
+def test_start_banner_counts_broken_titles_separately(workdir):
+    write_tracks(workdir / "tracks.txt", BROKEN_LIST)
+    _, out = run(["--dry-run"], FakeClient())
+    assert "Искать впервые: 2." in out and "Ждут выбора" not in out

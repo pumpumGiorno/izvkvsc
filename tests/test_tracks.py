@@ -85,3 +85,16 @@ def test_utf16_file(tmp_path):
     f.write_bytes("Кино — Звезда\n".encode("utf-16"))
     tracks, _ = read_tracks(f)
     assert tracks[0].artist == "Кино"
+
+
+@pytest.mark.parametrize(
+    "title", ["320", "~128", "~192", "256 kbps", "128kbps", "~320 KBPS", " 320 ", "~ 128", "320 кбит/с", "192 kbit/s"]
+)
+def test_bitrate_titles_are_broken(title):
+    assert Track("@ФакШиза", title).broken_title
+
+
+@pytest.mark.parametrize("title", ["22", "505", "99", "911", "1979", "Believer", "320 Degrees", "~ночь", ""])
+def test_real_titles_are_not_broken(title):
+    # «Arctic Monkeys — 505», «Taylor Swift — 22»: числа, но не стандартный битрейт.
+    assert not Track("Artist", title).broken_title

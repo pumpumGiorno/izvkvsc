@@ -31,7 +31,7 @@ from .soundcloud import (
     SoundCloudError,
     playlist_track_count,
 )
-from .state import AUTO, DECIDED, MANUAL, MATCHED, NOT_FOUND, PENDING, SKIPPED, State, StateError
+from .state import AUTO, BROKEN, DECIDED, MANUAL, MATCHED, NOT_FOUND, PENDING, SKIPPED, State, StateError
 from .tracks import Track, TracksFileError, format_duration, read_tracks, track_keys
 
 log = logging.getLogger("vk2sc")
@@ -89,7 +89,7 @@ def setup_logging(verbose: bool, log_path: Path = Path("vk2sc.log")) -> None:
 def build_queries(track: Track) -> list[str]:
     """Основной запрос и, если есть смысл, один запасной."""
     artist = clean_artist_for_query(track.artist)
-    title = clean_title_for_query(track.title)
+    title = clean_title_for_query(track.title) or track.title.strip()
     main = f"{artist} {title}".strip()
     alt = None
     if "ё" in main.lower():
@@ -176,16 +176,29 @@ class Runner:
 
     # ---------- поиск и сопоставление ----------
 
-    def needs_work(self, entry: Optional[dict]) -> bool:
+    def needs_work(self, entry: Optional[dict], track: Optional[Track] = None) -> bool:
+        if track is not None and track.broken_title:
+            # Перекрываем старые автоматические записи: раньше такой трек мог «найтись» случайно.
+            # Ручной выбор не трогаем — это могла быть настоящая песня «128».
+            if entry is None or entry["status"] not in (BROKEN, MANUAL):
+                return True
+            return entry["status"] == BROKEN and self.args.review and self.interactive
         if entry is None or entry["status"] == PENDING:
             return True
         return self.args.review and self.interactive and entry["status"] in (SKIPPED, NOT_FOUND)
 
     def match_all(self) -> None:
-        todo = [i for i, k in enumerate(self.keys) if self.needs_work(self.state.get(k))]
-        entries = [self.state.get(k) for k in self.keys]
-        fresh = sum(1 for e in entries if e is None)
-        waiting = len(todo) - fresh
+        todo = [i for i, k in enumerate(self.keys) if self.needs_work(self.state.get(k), self.tracks[i])]
+        broken = [t for t in self.tracks if t.broken_title]
+        if broken:
+            lines = ", ".join(str(t.line_no) for t in broken[:15]) + (" …" if len(broken) > 15 else "")
+            self.out(
+                f"Треков с битым названием (вместо названия битрейт, например «{broken[0].title}»): {len(broken)}, "
+                f"строки {lines}. Искать их не буду. Перевыгрузите список из VK (см. README) или исправьте tracks.txt."
+            )
+        broken_todo = sum(1 for i in todo if self.tracks[i].broken_title)
+        fresh = sum(1 for i in todo if self.state.get(self.keys[i]) is None and not self.tracks[i].broken_title)
+        waiting = len(todo) - fresh - broken_todo
         self.out(
             f"Треков в списке: {len(self.tracks)}. Решено раньше: {len(self.tracks) - len(todo)}. "
             f"Искать впервые: {fresh}." + (f" Ждут выбора (из кэша, без нового поиска): {waiting}." if waiting else "")
@@ -199,6 +212,17 @@ class Runner:
         track, key = self.tracks[i], self.keys[i]
         entry = self.state.get(key)
         self.out(f"\n[{i + 1}/{len(self.tracks)}] {track.display}")
+
+        if track.broken_title:
+            # Не ищем ни по названию-битрейту, ни по одному исполнителю: результат был бы случайным.
+            if entry and entry["status"] == BROKEN and self.args.review and self.interactive:
+                self.out("  Название похоже на битрейт, автоматически не ищу. Если это настоящее название, найдите трек сами.")
+                status, chosen, ranked = self.ask(track, Decision("none", []), [], skip_status=BROKEN)
+                self.save(key, track, status, chosen, ranked, [])
+                return
+            self.out("  ✗ битое название (похоже на битрейт) — не ищу")
+            self.save(key, track, BROKEN, None, [], [])
+            return
 
         if entry and entry.get("candidates") is not None:
             # Уже искали: берём кэш, повторно в SoundCloud не ходим.
@@ -268,20 +292,19 @@ class Runner:
             flags = f"  [{c.flags}]" if c.flags else ""
             self.out(f"   {n}. {c.display}  {dur}  {s.score}%  {c.url}{flags}")
 
-    def ask(self, track: Track, decision: Decision, queries: list[str]) -> tuple[str, Optional[Scored], list[Scored]]:
+    def ask(self, track: Track, decision: Decision, queries: list[str],
+            skip_status: Optional[str] = None) -> tuple[str, Optional[Scored], list[Scored]]:
         ranked = decision.ranked
         shown = ranked[:SHOW_CANDIDATES] if decision.kind == "ask" else []
-        skip_status = SKIPPED if shown else NOT_FOUND
-        if shown:
-            self.out(f"  Нужен ваш выбор: {decision.reason}.")
-        else:
-            self.out("  Ничего похожего не нашлось.")
+        if skip_status is None:
+            skip_status = SKIPPED if shown else NOT_FOUND
+            self.out(f"  Нужен ваш выбор: {decision.reason}." if shown else "  Ничего похожего не нашлось.")
         while True:
             if shown:
                 self.show(shown)
             answer = self.input("  Номер — выбрать, Enter — пропустить, текст или ссылка — искать иначе: ").strip()
             if not answer:
-                self.out("  → пропущен" if skip_status == SKIPPED else "  → не найден")
+                self.out({SKIPPED: "  → пропущен", NOT_FOUND: "  → не найден"}.get(skip_status, "  → оставлен как есть"))
                 return skip_status, None, ranked
             if answer.isdigit() and 1 <= int(answer) <= len(shown):
                 chosen = shown[int(answer) - 1]

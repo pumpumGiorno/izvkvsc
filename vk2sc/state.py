@@ -21,9 +21,10 @@ MANUAL = "manual"  # выбран вручную
 SKIPPED = "skipped"  # пропущен пользователем
 NOT_FOUND = "not_found"  # ничего похожего
 PENDING = "pending"  # нужен ручной выбор, но спросить было нельзя (--no-input)
+BROKEN = "broken_title"  # вместо названия битрейт («320», «~128») — не ищется
 
 MATCHED = (AUTO, MANUAL)
-DECIDED = (AUTO, MANUAL, SKIPPED, NOT_FOUND)
+DECIDED = (AUTO, MANUAL, SKIPPED, NOT_FOUND, BROKEN)
 
 
 class StateError(Exception):

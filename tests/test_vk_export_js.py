@@ -104,3 +104,45 @@ def test_empty_page_gives_clear_error_and_no_file(results):
     assert "треки не найдены" in res["error"]
     assert res["dialogs"] and "Не нашёл ни одной аудиозаписи" in res["dialogs"][0]
     assert any("Классы на странице" in c for c in res["console"])
+
+
+BADGES = ("320", "~128", "~192", "kbps", "HQ", "МБ")
+
+
+def test_new_vk_music_markup_ignores_bitrate_badges(results):
+    """Вёрстка vk.com/music/… с расширением, которое вставляет бейджи битрейта (прислана пользователем)."""
+    res = results["vk_music_badges.html"]
+    assert res["error"] is None
+    assert res["result"]["strategy"] == "VK Музыка (data-testid)"
+    lines = lines_of(res)
+    assert lines[:8] == [
+        "@ФакШиза — BUSTDOWN | 1:13",
+        "королевский XVII — market deathmatch | 1:55",
+        "Party Animals — Have You Ever Been Mellow (Flamman & Abraxas Radio Mix) | 3:05",
+        "elyaplugg!, huzzy b — Song | 2:08",
+        "CLONNEX — Fading | 1:54",  # бейдж ~128 был внутри ссылки с названием
+        "emothug — Night Drive | 0:52",  # бейдж ~192 был просто текстом в названии
+        "Taylor Swift — 22 | 3:52",  # название из цифр, но не битрейт
+        "Mirèle, ONDA ANDAR — Ночь | 2:30",
+    ]
+    assert lines[8:11] == [
+        "112 — Cupid | 4:07",  # имя из цифр не приняли за бейдж
+        "Some Band — 128 | 3:00",  # название «128» не выброшено; битым его пометит vk2sc
+        "Lazy Loader — Late Title | 2:22",  # название, дорисованное после первого сбора
+    ]
+    assert len(lines) == 21  # 22 строки минус одна без названия
+    for line in lines:
+        title = parse_line(line).title
+        assert title == "128" or not any(b in title for b in BADGES), line
+    assert not any("Плеер" in l or "Akira" in l for l in lines)
+    warnings = " ".join(res["result"]["warnings"])
+    assert "без названия: 1" in warnings and "Akira Yamaoka" in warnings
+    assert res["file"] and all(parse_line(l) for l in res["file"]["text"].splitlines()[1:])
+
+
+def test_badges_without_titles_give_error_not_file(results):
+    res = results["vk_music_no_titles.html"]
+    assert res["result"] is None and res["file"] is None
+    assert "названия не распознаны" in res["error"]
+    message = res["dialogs"][0]
+    assert "расширение" in message and "vk_diagnose.js" in message and "Файл не создан" in message
