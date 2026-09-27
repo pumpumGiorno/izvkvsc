@@ -17,7 +17,8 @@ def run_script(tmp_path, scenario="ok", runs=1, plan=PLAN):
     if not shutil.which("node"):
         pytest.skip("Node.js не установлен")
     script = tmp_path / "soundcloud_playlists.js"
-    script.write_text(build_script(plan, "private", "F" * 32, pause_ms=0), encoding="utf-8-sig")
+    script.write_text(build_script(plan, "private", "F" * 32, pause_ms=0, captcha_poll_ms=10, captcha_wait_ms=300),
+                      encoding="utf-8-sig")
     proc = subprocess.run(["node", str(RUNNER), str(script), scenario, str(runs)],
                           capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
@@ -57,11 +58,28 @@ def test_finds_marked_playlist_and_ignores_unmarked_one(tmp_path):
     assert [p["track_count"] for p in data["playlists"]] == [3, 0, 2]
 
 
-def test_captcha_stops_with_clear_message(tmp_path):
+def test_captcha_waits_for_human_then_continues(tmp_path):
+    """Реальный случай: POST из консоли получил капчу DataDome. Скрипт ждёт, пока человек
+    закроет F12 и пройдёт проверку (меняется cookie datadome), и продолжает сам."""
+    data = run_script(tmp_path, scenario="captcha_once")
+    assert data["results"][0]["ok"] is True
+    assert writes(data) == [("POST", "/playlists"), ("POST", "/playlists"), ("POST", "/playlists")]
+    assert any("ЗАКРОЙТЕ панель разработчика" in line for line in data["logs"])
+    assert data["title"].startswith("vk2sc: готово") and "«Из VK» — 3 треков" in data["status"]
+
+
+def test_captcha_not_solved_stops_after_timeout(tmp_path):
     data = run_script(tmp_path, scenario="captcha")
     assert data["results"][0]["ok"] is False
-    assert writes(data) == [("POST", "/playlists")]  # после капчи больше ничего не отправляет
-    assert any("я не робот" in line for line in data["logs"])
+    assert writes(data) == [("POST", "/playlists")]  # без пройденной проверки запрос не повторяет
+    assert any("не пройдена" in line for line in data["logs"])
+    assert "не всё получилось" in data["status"]
+
+
+def test_no_manual_datadome_header_when_page_has_datadome_tag(tmp_path):
+    data = run_script(tmp_path, scenario="dd_tag", plan=PLAN[:1])
+    post = next(r for r in data["requests"] if r["method"] == "POST")
+    assert "X-Datadome-ClientId" not in post["headers"] and post["credentials"] == "include"
 
 
 def test_description_rejected_retries_without_it(tmp_path):

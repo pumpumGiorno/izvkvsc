@@ -30,7 +30,13 @@ async function fakeFetch(url, opts = {}) {
   if (opts.method === "GET" && u.pathname === "/users/42/playlists_without_albums")
     return reply(200, { collection: server.playlists, next_href: null });
   if (opts.method === "POST" && u.pathname === "/playlists") {
-    if (scenario === "captcha") return reply(403, null, '{"url":"https://geo.captcha-delivery.com/captcha/?initialCid=x"}');
+    const captcha = '{"url":"https://geo.captcha-delivery.com/captcha/?initialCid=x"}';
+    if (scenario === "captcha") return reply(403, null, captcha);
+    if (scenario === "captcha_once" && !server.solved) {
+      // Человек закрывает F12 и проходит проверку — DataDome выдаёт новую cookie.
+      setTimeout(() => { sandbox.document.cookie = sandbox.document.cookie.replace("DDcookieValue", "DDsolved"); server.solved = true; }, 30);
+      return reply(403, null, captcha);
+    }
     if (scenario === "reject_description" && body.playlist.description) return reply(422, { error: "description" });
     const p = { id: server.nextId++, ...body.playlist, tracks: body.playlist.tracks.map((id) => ({ id })),
                 track_count: body.playlist.tracks.length, permalink_url: "https://soundcloud.com/tester/sets/p" + server.nextId };
@@ -48,8 +54,16 @@ async function fakeFetch(url, opts = {}) {
   return reply(404, {});
 }
 
+const elements = {};
 const sandbox = {
-  document: { cookie: "sc_anonymous_id=x; oauth_token=2-111-222-TokenFromCookie; datadome=DDcookieValue" },
+  document: {
+    cookie: "sc_anonymous_id=x; oauth_token=2-111-222-TokenFromCookie; datadome=DDcookieValue",
+    title: "SoundCloud",
+    getElementById: (id) => elements[id] || null,
+    createElement: () => ({ style: {}, textContent: "" }),
+    body: { appendChild: (el) => { elements[el.id] = el; } },
+    querySelector: () => null,
+  },
   location: { hostname: "soundcloud.com" },
   performance: { getEntriesByType: () => [{ name: API + "/me?client_id=" + "P".repeat(32) + "&app_version=1" }] },
   localStorage: { getItem: (k) => (k in storage ? storage[k] : null), setItem: (k, v) => { storage[k] = String(v); } },
@@ -64,6 +78,7 @@ const sandbox = {
   },
 };
 sandbox.window = sandbox;
+if (scenario === "dd_tag") sandbox.ddjskey = "SITEKEY";
 const ctx = vm.createContext(sandbox);
 
 (async () => {
@@ -72,5 +87,7 @@ const ctx = vm.createContext(sandbox);
     vm.runInContext(code, ctx);
     results.push(await ctx.vk2scRun);
   }
-  console.log(JSON.stringify({ results, requests, logs, storage, playlists: server.playlists }));
+  const statusBox = elements["vk2sc-status"];
+  console.log(JSON.stringify({ results, requests, logs, storage, playlists: server.playlists,
+                               title: sandbox.document.title, status: statusBox ? statusBox.textContent : null }));
 })().catch((e) => { console.error(e); process.exit(1); });
