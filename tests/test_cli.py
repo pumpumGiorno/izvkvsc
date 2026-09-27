@@ -93,8 +93,12 @@ class Inputs:
 
 @pytest.fixture
 def workdir(tmp_path, monkeypatch):
+    from vk2sc import envfile
+
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("SOUNDCLOUD_OAUTH_TOKEN", raising=False)
+    # .env ищется только во временной папке: настоящий .env разработчика не должен влиять на тесты.
+    monkeypatch.setattr(envfile, "env_candidates", lambda: [tmp_path / ".env"])
     return tmp_path
 
 

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import report
+from .envfile import TOKEN_KEY, diagnose_token, load_env
 from .matching import (
     AUTO_THRESHOLD,
     MATCHING_VERSION,
@@ -554,9 +555,10 @@ class Runner:
         if not ids:
             self.out("\nНе найдено ни одного трека для плейлиста.")
             return 0
-        token = os.environ.get("SOUNDCLOUD_OAUTH_TOKEN", "").strip()
+        token = os.environ.get(TOKEN_KEY, "").strip()
         if not token:
-            self.out("\nДля создания плейлиста нужен SOUNDCLOUD_OAUTH_TOKEN в файле .env (см. README).")
+            self.out(f"\nДля создания плейлиста нужен {TOKEN_KEY} в файле .env (см. README).")
+            self.out(diagnose_token())
             self.out("Результаты поиска сохранены: после добавления токена поиск повторяться не будет.")
             return 1
         self.client.set_oauth_token(token)
@@ -678,11 +680,7 @@ def main(argv: Optional[list[str]] = None, client: Optional[SoundCloudClient] = 
             stream.reconfigure(errors="replace")
         except (AttributeError, ValueError):
             pass
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-    except ImportError:
-        pass
+    load_env()
     setup_logging(args.verbose)
 
     try:
