@@ -5,7 +5,7 @@ import pytest
 import requests
 import responses
 
-from vk2sc.soundcloud import API, SITE, AuthError, Redactor, RetryExhausted, SoundCloudClient
+from vk2sc.soundcloud import API, SITE, AuthError, BlockedError, Redactor, RetryExhausted, SoundCloudClient
 
 CID = "A" * 32
 CID2 = "B" * 32
@@ -144,7 +144,8 @@ def test_create_and_update_playlist_bodies(tmp_path, caplog):
         client.create_playlist("Из VK", [1, 2], "private")
         client.set_playlist_tracks(77, [1, 2, 3])
     post, put = responses.calls[0].request, responses.calls[1].request
-    assert json.loads(post.body) == {"playlist": {"title": "Из VK", "sharing": "private", "tracks": [1, 2]}}
+    assert json.loads(post.body) == {"playlist": {"title": "Из VK", "sharing": "private",
+                                                  "description": "Перенесено из VK (vk2sc)", "tracks": [1, 2]}}
     assert json.loads(put.body) == {"playlist": {"tracks": [1, 2, 3]}}
     assert post.headers["Authorization"] == f"OAuth {TOKEN}"
 
@@ -198,3 +199,39 @@ def test_token_never_sent_outside_api_host(tmp_path):
     with pytest.raises(Exception, match="Неожиданный адрес"):
         client.user_playlists(42)
     assert all("evil" not in c.request.url for c in responses.calls)
+
+
+DATADOME_BODY = '{"url":"https://geo.captcha-delivery.com/captcha/?initialCid=AHrlqAAA&cid=Se2LM6&hash=X"}'
+
+
+@responses.activate
+def test_datadome_block_is_recognized_without_client_id_refresh(tmp_path):
+    """Реальный ответ api-v2 на POST /playlists из Python: 403 от DataDome, а не от токена."""
+    (tmp_path / "cache.json").write_text(json.dumps({"client_id": CID}))
+    responses.add(responses.POST, API + "/playlists", body=DATADOME_BODY, status=403,
+                  headers={"x-datadome": "protected", "x-dd-b": "2"})
+    client, _ = make_client(tmp_path, oauth_token=TOKEN)
+    with pytest.raises(BlockedError) as e:
+        client.create_playlist("Из VK", [1, 2])
+    assert "браузер" in str(e.value) and "Токен при этом в порядке" in str(e.value)
+    assert len(responses.calls) == 1  # client_id не обновлялся, повторов нет
+
+
+@responses.activate
+def test_plain_403_is_still_an_auth_error(tmp_path):
+    (tmp_path / "cache.json").write_text(json.dumps({"client_id": CID}))
+    mock_home(CID2)
+    responses.add(responses.GET, API + "/me", status=403, body="forbidden")
+    client, _ = make_client(tmp_path, oauth_token=TOKEN)
+    with pytest.raises(AuthError):
+        client.me()
+
+
+@responses.activate
+def test_description_is_dropped_if_rejected(tmp_path):
+    (tmp_path / "cache.json").write_text(json.dumps({"client_id": CID}))
+    responses.add(responses.POST, API + "/playlists", json={"error": "bad field"}, status=422)
+    responses.add(responses.POST, API + "/playlists", json={"id": 5, "track_count": 1}, status=201)
+    client, _ = make_client(tmp_path, oauth_token=TOKEN)
+    assert client.create_playlist("x", [1])["id"] == 5
+    assert "description" not in json.loads(responses.calls[1].request.body)["playlist"]

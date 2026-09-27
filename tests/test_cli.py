@@ -903,3 +903,80 @@ def test_low_confidence_log_shows_features(workdir):
     assert "→ пропущен: низкая уверенность (другая версия)" in out
     row = read_report(workdir / "report.csv")[1]
     assert row[STATUS] == "пропущен: низкая уверенность" and row[14] == "да"
+
+
+# ---- Создание плейлистов через браузер (DataDome) ----
+
+
+def test_datadome_block_falls_back_to_browser_script(workdir, monkeypatch):
+    """Реальный случай: /me проходит, а POST /playlists получает 403 от DataDome."""
+    from vk2sc.soundcloud import BlockedError
+
+    monkeypatch.setenv("SOUNDCLOUD_OAUTH_TOKEN", "secret-token-value")
+    write_tracks(workdir / "tracks.txt", BASIC[:3])
+
+    class Blocked(FakeClient):
+        def create_playlist(self, title, track_ids, sharing="private"):
+            raise BlockedError("SoundCloud пропускает изменения в аккаунте только из браузера. "
+                               "Токен при этом в порядке.")
+
+    client = Blocked()
+    inputs = Inputs("y")
+    code, out = run(["--title", "Из VK"], client, interactive=True, inputs=inputs)
+    assert code == 3 and inputs.prompts == ["Продолжить? [y/N]: "]
+    assert "Токен при этом в порядке" in out and "устарел" not in out
+    assert "soundcloud_playlists.js" in out and "вошли в аккаунт tester" in out and "allow pasting" in out
+    script = (workdir / "soundcloud_playlists.js").read_text(encoding="utf-8-sig")
+    assert '"title":"Из VK","tracks":[1,2,3]' in script and "secret-token-value" not in script
+    state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
+    assert state["playlists"] == [] and state["pending_create"] is None
+
+
+def test_browser_flag_needs_no_token_and_changes_nothing(workdir):
+    write_tracks(workdir / "tracks.txt", BASIC[:2])
+    run(["--dry-run"], FakeClient())
+    client = FakeClient()
+    code, out = run(["--browser", "--title", "Мой VK"], client, interactive=True, inputs=NoInput())
+    assert code == 0 and client.created == [] and client.updated == [] and client.oauth_token is None
+    script = (workdir / "soundcloud_playlists.js").read_text(encoding="utf-8-sig")
+    assert '"title":"Мой VK","tracks":[1,2]' in script and "«Мой VK» — 2 треков" in out
+
+
+def test_browser_script_splits_into_parts_of_500(workdir):
+    catalog = [sc_track(i, f"Song number {i}", "Band") for i in range(1, 503)]
+    write_tracks(workdir / "tracks.txt", [f"Band — Song number {i}" for i in range(1, 503)])
+
+    class ExactClient(FakeClient):
+        def search_tracks(self, query, limit=20):
+            return [t for t in self.catalog if f"Band {t['title']}" == query]
+
+    code, _ = run(["--browser"], ExactClient(catalog), interactive=True, inputs=NoInput())
+    script = (workdir / "soundcloud_playlists.js").read_text(encoding="utf-8-sig")
+    assert code == 0 and '"title":"Из VK","tracks":[1,2,3,' in script and '"title":"Из VK (2)","tracks":[501,502]' in script
+
+
+def test_playlists_created_in_browser_are_adopted(workdir, monkeypatch):
+    monkeypatch.setenv("SOUNDCLOUD_OAUTH_TOKEN", "secret-token-value")
+    write_tracks(workdir / "tracks.txt", BASIC[:3])
+    client = FakeClient()
+    client.remote_playlists = [
+        {"id": 900, "title": "Из VK", "description": "мой старый плейлист", "created_at": "2026-09-01T00:00:00Z"},
+        {"id": 901, "title": "Из VK", "description": "Перенесено из VK (vk2sc)", "created_at": "2026-09-27T12:00:00Z",
+         "permalink_url": "https://soundcloud.com/tester/sets/iz-vk", "sharing": "private",
+         "tracks": [{"id": 1}, {"id": 2}, {"id": 3}], "track_count": 3},
+    ]
+    code, out = run(["--title", "Из VK"], client, interactive=True, inputs=NoInput())
+    assert code == 0 and client.created == [] and client.updated == []
+    assert "созданный в браузере" in out and "уже в актуальном состоянии" in out
+    state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
+    assert state["playlists"][0]["id"] == 901  # чужой «Из VK» без метки не тронут
+    assert [r[STATUS] for r in read_report(workdir / "report.csv")[1:]] == ["добавлен"] * 3
+
+
+def test_same_title_without_mark_is_not_adopted(workdir, monkeypatch):
+    monkeypatch.setenv("SOUNDCLOUD_OAUTH_TOKEN", "secret-token-value")
+    write_tracks(workdir / "tracks.txt", BASIC[:1])
+    client = FakeClient()
+    client.remote_playlists = [{"id": 900, "title": "Из VK", "description": "", "tracks": [{"id": 1}], "track_count": 1}]
+    code, _ = run(["--title", "Из VK", "--yes"], client, interactive=True, inputs=NoInput())
+    assert code == 0 and client.created == [("Из VK", [1], "private")]

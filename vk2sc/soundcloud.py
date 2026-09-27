@@ -37,7 +37,9 @@ MAX_RETRY_AFTER = 120  # если сервер просит ждать доль�
 
 
 class SoundCloudError(Exception):
-    pass
+    def __init__(self, message: str = "", status: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class RetryExhausted(SoundCloudError):
@@ -50,6 +52,25 @@ class AuthError(SoundCloudError):
 
 class PlaylistNotFound(SoundCloudError):
     pass
+
+
+class BlockedError(SoundCloudError):
+    """Запрос отклонила защита от ботов (DataDome), а не токен: изменения в аккаунте
+    SoundCloud пускает только из настоящего браузера. См. browser.py."""
+
+
+# Метка в описании плейлистов, созданных программой: по ней их находят повторные запуски
+# и браузерный скрипт, не трогая другие плейлисты с таким же названием.
+PLAYLIST_MARK = "vk2sc"
+PLAYLIST_DESCRIPTION = "Перенесено из VK (vk2sc)"
+
+
+def is_datadome_block(resp: requests.Response) -> bool:
+    """403 от DataDome: заголовок x-datadome и ссылка на капчу в теле."""
+    if resp.status_code != 403:
+        return False
+    headers = {k.lower(): v.lower() for k, v in resp.headers.items()}
+    return "x-datadome" in headers or "captcha-delivery.com" in resp.text[:2000]
 
 
 class Redactor(logging.Filter):
@@ -225,6 +246,14 @@ class SoundCloudClient:
         while True:
             query = dict(params or {}, client_id=self.client_id)
             resp = self._send(method, url, params=query, json=body, headers=headers)
+            if resp.status_code >= 400:
+                log.debug("SoundCloud %s %s → HTTP %s: %s", method, url.replace(API, ""), resp.status_code,
+                          Redactor.clean(resp.text[:300]))
+            if is_datadome_block(resp):
+                # Обновление client_id тут не поможет — только лишние запросы.
+                raise BlockedError(
+                    "SoundCloud пропускает изменения в аккаунте только из браузера (защита от ботов DataDome). "
+                    "Токен при этом в порядке.", status=403)
             if resp.status_code in (401, 403) and not refreshed:
                 log.info("SoundCloud ответил %s — обновляю client_id", resp.status_code)
                 self.refresh_client_id()
@@ -236,11 +265,11 @@ class SoundCloudClient:
                 "Проверьте SOUNDCLOUD_OAUTH_TOKEN в .env: возможно, он устарел (перевойдите на сайте и скопируйте заново)."
                 if auth else "client_id не принимается даже после обновления."
             )
-            raise AuthError(f"SoundCloud отклонил запрос (HTTP {resp.status_code}). {hint}")
+            raise AuthError(f"SoundCloud отклонил запрос (HTTP {resp.status_code}). {hint}", status=resp.status_code)
         if resp.status_code == 404:
             return None
         if resp.status_code >= 400:
-            raise SoundCloudError(f"HTTP {resp.status_code}: {Redactor.clean(resp.text[:300])}")
+            raise SoundCloudError(f"HTTP {resp.status_code}: {Redactor.clean(resp.text[:300])}", status=resp.status_code)
         return resp.json() if resp.content else {}
 
     def search_tracks(self, query: str, limit: int = 20) -> list[dict]:
@@ -270,8 +299,15 @@ class SoundCloudClient:
         return result
 
     def create_playlist(self, title: str, track_ids: list[int], sharing: str = "private") -> dict:
-        body = {"playlist": {"title": title, "sharing": sharing, "tracks": track_ids}}
-        data = self._api("POST", "/playlists", body=body, auth=True)
+        body = {"playlist": {"title": title, "sharing": sharing, "description": PLAYLIST_DESCRIPTION,
+                             "tracks": track_ids}}
+        try:
+            data = self._api("POST", "/playlists", body=body, auth=True)
+        except SoundCloudError as e:
+            if e.status not in (400, 422):
+                raise
+            del body["playlist"]["description"]  # на случай, если описание при создании не принимается
+            data = self._api("POST", "/playlists", body=body, auth=True)
         if not data or "id" not in data:
             raise SoundCloudError("SoundCloud не вернул id созданного плейлиста.")
         return data

@@ -40,8 +40,11 @@ from .normalize import (
     simplify,
     translit,
 )
+from .browser import SCRIPT_NAME, write_script
 from .soundcloud import (
+    PLAYLIST_MARK,
     AuthError,
+    BlockedError,
     PlaylistNotFound,
     Redactor,
     RetryExhausted,
@@ -96,6 +99,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="не спрашивать подтверждения перед созданием/изменением плейлиста")
     p.add_argument("--title", help=f"название плейлиста (по умолчанию «{DEFAULT_TITLE}»)")
     p.add_argument("--public", action="store_true", help="сделать плейлист публичным (по умолчанию приватный)")
+    p.add_argument("--browser", action="store_true",
+                   help=f"не менять плейлисты через API, а создать {SCRIPT_NAME} для консоли браузера на soundcloud.com")
     p.add_argument("--interactive", action="store_true",
                    help="старый режим: спрашивать выбор кандидата, если совпадение сомнительное")
     p.add_argument("--no-input", action="store_true",
@@ -209,6 +214,7 @@ class Runner:
         self.input = input_fn
         self.out = out
         self.search_count = 0
+        self.me: Optional[dict] = None
 
     # ---------- общий сценарий ----------
 
@@ -547,6 +553,12 @@ class Runner:
             ids.append(tid)
         return ids, duplicates
 
+    def playlist_titles(self, count: int) -> list[str]:
+        """Названия плейлистов по порядку: уже созданные сохраняют своё, новые — «Из VK», «Из VK (2)»…"""
+        title = self.state.playlist_title or DEFAULT_TITLE
+        return [self.state.playlists[k]["title"] if k < len(self.state.playlists)
+                else (title if k == 0 else f"{title} ({k + 1})") for k in range(count)]
+
     def sync_playlists(self) -> int:
         ids, _ = self.desired_ids()
         pending = sum(1 for k in self.keys if (self.state.get(k) or {}).get("status") == PENDING)
@@ -555,20 +567,36 @@ class Runner:
         if not ids:
             self.out("\nНе найдено ни одного трека для плейлиста.")
             return 0
+        chunks = [ids[i:i + PLAYLIST_LIMIT] for i in range(0, len(ids), PLAYLIST_LIMIT)]
+        if self.args.browser:
+            return self.browser_script(chunks)
         token = os.environ.get(TOKEN_KEY, "").strip()
         if not token:
             self.out(f"\nДля создания плейлиста нужен {TOKEN_KEY} в файле .env (см. README).")
             self.out(diagnose_token())
             self.out("Результаты поиска сохранены: после добавления токена поиск повторяться не будет.")
+            self.out("Можно и без токена в .env: python -m vk2sc --browser создаст скрипт для консоли браузера.")
             return 1
         self.client.set_oauth_token(token)
+        try:
+            return self.sync_via_api(chunks)
+        except BlockedError as e:
+            # POST не прошёл — плейлист не создан, ждать его при следующем запуске не нужно.
+            self.state.pending_create = None
+            self.state.save()
+            self.out(f"\n{e}")
+            self.browser_script(chunks)
+            return 3
+
+    def sync_via_api(self, chunks: list[list[int]]) -> int:
         me = self.client.me()
+        self.me = me
         if self.state.pending_create:
             self.recover_pending_create(me)
+        self.adopt_browser_playlists(me, chunks)
 
-        title = self.state.playlist_title or DEFAULT_TITLE
         sharing = "public" if self.args.public else "private"
-        chunks = [ids[i:i + PLAYLIST_LIMIT] for i in range(0, len(ids), PLAYLIST_LIMIT)]
+        titles = self.playlist_titles(len(chunks))
         plan = []
         for k, chunk in enumerate(chunks):
             if k < len(self.state.playlists):
@@ -576,7 +604,7 @@ class Runner:
                 if pl.get("track_ids") != chunk:
                     plan.append(("update", k, pl["title"], chunk))
             else:
-                plan.append(("create", k, title if k == 0 else f"{title} ({k + 1})", chunk))
+                plan.append(("create", k, titles[k], chunk))
         for pl in self.state.playlists[len(chunks):]:
             self.out(f"Плейлист «{pl['title']}» больше не нужен для этого списка — не трогаю его.")
         if not plan:
@@ -626,6 +654,61 @@ class Runner:
                 pl["track_ids"] = chunk
                 self.state.save()
             self.verify(pl, data, chunk)
+        return 0
+
+    def adopt_browser_playlists(self, me: dict, chunks: list[list[int]]) -> None:
+        """Плейлисты, созданные браузерным скриптом, программа ещё не знает — находим их по
+        названию и метке «vk2sc» в описании, чтобы не создать второй раз и не спрашивать зря."""
+        if len(self.state.playlists) >= len(chunks):
+            return
+        try:
+            remote = self.client.user_playlists(int(me["id"]))
+        except BlockedError:
+            raise
+        except SoundCloudError as e:
+            log.warning("Не удалось получить плейлисты аккаунта: %s", e)
+            return
+        known = {pl.get("id") for pl in self.state.playlists}
+        titles = self.playlist_titles(len(chunks))
+        for k in range(len(self.state.playlists), len(chunks)):
+            found = [p for p in remote if p.get("title") == titles[k] and p.get("id") not in known
+                     and PLAYLIST_MARK in (p.get("description") or "")]
+            if not found:
+                break  # плейлисты идут по порядку: «Из VK», «Из VK (2)»…
+            p = max(found, key=lambda x: _parse_time(x.get("created_at")) or 0)
+            remote_ids = [int(t["id"]) for t in p.get("tracks") or [] if isinstance(t, dict) and "id" in t]
+            # Скрипт ставит ровно нужный список; если SoundCloud отдал его не полностью или
+            # отбросил недоступные треки, не гоняем обновление по кругу.
+            track_ids = chunks[k] if set(remote_ids) <= set(chunks[k]) else remote_ids
+            self.state.playlists.append({"id": int(p["id"]), "title": titles[k], "url": p.get("permalink_url"),
+                                         "sharing": p.get("sharing"), "track_ids": track_ids})
+            self.out(f"Нашёл плейлист «{titles[k]}», созданный в браузере, — продолжаю с ним.")
+        self.state.save()
+
+    def browser_script(self, chunks: list[list[int]]) -> int:
+        """Пишет soundcloud_playlists.js и объясняет, как запустить его на soundcloud.com."""
+        sharing = "public" if self.args.public else "private"
+        plan = list(zip(self.playlist_titles(len(chunks)), chunks))
+        client_id = getattr(self.client, "_client_id", None)
+        if not client_id and hasattr(self.client, "_load_cached_client_id"):
+            client_id = self.client._load_cached_client_id()
+        path = Path(SCRIPT_NAME).resolve()
+        try:
+            write_script(path, plan, sharing, client_id)
+        except OSError as e:
+            self.out(f"Не удалось записать {path}: {e}")
+            return 1
+        account = (getattr(self, "me", None) or {}).get("username")
+        self.out(f"\nСоздал файл {path} — он создаст плейлисты прямо из браузера "
+                 f"({', '.join(f'«{t}» — {len(c)} треков' for t, c in plan)}):")
+        self.out("  1. Откройте https://soundcloud.com в браузере, где вы вошли в аккаунт"
+                 + (f" {account}." if account else "."))
+        self.out("  2. Нажмите F12 и перейдите на вкладку Console (Консоль).")
+        self.out(f"  3. Откройте файл в Блокноте (notepad {SCRIPT_NAME}), нажмите Ctrl+A и Ctrl+C,")
+        self.out("     вставьте в консоль и нажмите Enter. Если браузер попросит, сначала наберите allow pasting.")
+        self.out("  4. Дождитесь таблицы со ссылками и сообщения «Готово».")
+        self.out("Повторный запуск скрипта не создаёт дублей. Потом запустите python -m vk2sc ещё раз —")
+        self.out("программа найдёт эти плейлисты и отметит треки в отчёте как добавленные.")
         return 0
 
     def verify(self, pl: dict, data: dict, chunk: list[int]) -> None:

@@ -7,6 +7,7 @@ state.json
 .state-*.json
 report.csv
 vk2sc.log
+soundcloud_playlists.js
 .cache/
 
 # Python
