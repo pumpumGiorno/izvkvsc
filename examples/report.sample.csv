@@ -1,16 +1,16 @@
-﻿line;original_artist;original_title;search_title;matched_artist;matched_title;soundcloud_url;score;status;search_variant;note
-3;Imagine Dragons;Believer (Official Audio);Believer;Imagine Dragons;Believer;https://soundcloud.com/imaginedragons/believer;100;автоматически выбран;очищенный;уверенное совпадение
-4;Кино;Группа крови;Группа крови;Кино;Группа крови;https://soundcloud.com/kino-scmusic/63nibgmlsvxl;100;автоматически выбран;исходный;лучший из 6 похожих
-5;Земфира;Хочешь?;Хочешь?;Земфира;ХОЧЕШЬ?;https://soundcloud.com/ziemfira-music/xochesh;100;автоматически выбран;исходный;лучший из 3 похожих
-6;Ёлка;Прованс;Прованс;Ёлка;Прованс;https://soundcloud.com/jolka-music/provans;100;автоматически выбран;только название;уверенное совпадение
-7;Miyagi & Andy Panda;Kosandra;Kosandra;Miyagi & Andy Panda;Kosandra;https://soundcloud.com/miyagi_black/miyagi-andy-panda-kosandra;100;автоматически выбран;исходный;уверенное совпадение
-8;The Weeknd feat. Daft Punk;Starboy;Starboy;The Weeknd;Starboy (feat. Daft Punk);https://soundcloud.com/theweeknd/starboy;100;автоматически выбран;исходный;уверенное совпадение
-9;Calvin Harris ft. Rihanna;This Is What You Came For;This Is What You Came For;Calvin Harris;This Is What You Came For (feat. Rihanna);https://soundcloud.com/calvinharris/this-is-what-you-came-for-1;100;автоматически выбран;исходный;уверенное совпадение
-10;Lady Gaga;Bad Romance (Skrillex Remix);Bad Romance Skrillex Remix;Lady Gaga;Bad Romance (Skrillex Remix);https://soundcloud.com/ladygaga/bad-romance-skrillex-remix;100;автоматически выбран;исходный;уверенное совпадение
-11;Daft Punk;Get Lucky (Radio Edit) ft. Pharrell Williams;Get Lucky Radio Edit;Daft Punk, Pharrell Williams, Nile Rodgers;Get Lucky (Radio Edit - feat. Pharrell Williams and Nile Rodgers);https://soundcloud.com/daftpunkofficialmusic/get-lucky-radio-edit;94;автоматически выбран;исходный;лучший из 2 похожих
-12;Сплин;Выхода нет;Выхода нет;Сплин;Выхода нет;https://soundcloud.com/splin-band/vykhoda-net;100;автоматически выбран;исходный;лучший из 2 похожих
-13;Macan;ASPHALT 8;ASPHALT 8;MACAN;ASPHALT 8;https://soundcloud.com/macan-sc/asphalt-8;100;автоматически выбран;исходный;лучший из 4 похожих
-14;Linkin Park;Numb [Official Music Video];Numb;Linkin Park;Numb;https://soundcloud.com/linkinpark/numb;100;автоматически выбран;очищенный;уверенное совпадение
-15;Tiësto;The Business;The Business;Tiësto;The Business;https://soundcloud.com/tiesto/the-business-1;100;автоматически выбран;исходный;уверенное совпадение
-16;Мумий Тролль;Владивосток 2000;Владивосток 2000;Мумий Тролль;Владивосток 2000;https://soundcloud.com/mumiytroll-music/vladivostok-2000-vladivostok;100;автоматически выбран;транслит;уверенное совпадение
-17;Avicii;Wake Me Up (Slowed + Reverb);Wake Me Up Slowed + Reverb;Ineegees;Avicii - Wake Me Up (Slowed);https://soundcloud.com/inee01/avicii-wake-me-up-slowed;100;автоматически выбран;исходный;лучший из 7 похожих
+﻿line;original_artist;original_title;search_title;matched_artist;matched_title;soundcloud_url;score;status;search_variant;note;title_score;artist_score;duration_delta;version_conflict;margin
+3;Imagine Dragons;Believer (Official Audio);Believer;Imagine Dragons;Believer;https://soundcloud.com/imaginedragons/believer;100;автоматически выбран;очищенный;точный исполнитель + длительность;100;100;0;нет;13
+4;Кино;Группа крови;Группа крови;Кино;Группа крови;https://soundcloud.com/kino-scmusic/63nibgmlsvxl;100;автоматически выбран;исходный;лучший из 5 похожих;100;100;;нет;0
+5;Земфира;Хочешь?;Хочешь?;Земфира;ХОЧЕШЬ?;https://soundcloud.com/ziemfira-music/xochesh;100;автоматически выбран;исходный;лучший из 3 похожих;100;100;;нет;0
+6;Ёлка;Прованс;Прованс;Ёлка;Прованс;https://soundcloud.com/jolka-music/provans;100;автоматически выбран;только название;точное совпадение исполнителя и названия;100;100;;нет;20
+7;Miyagi & Andy Panda;Kosandra;Kosandra;Miyagi & Andy Panda;Kosandra;https://soundcloud.com/miyagi_black/miyagi-andy-panda-kosandra;100;автоматически выбран;исходный;точное совпадение исполнителя и названия;100;100;;нет;30
+8;The Weeknd feat. Daft Punk;Starboy;Starboy;The Weeknd;Starboy (feat. Daft Punk);https://soundcloud.com/theweeknd/starboy;100;автоматически выбран;исходный;точный исполнитель + длительность;100;100;0;нет;20
+9;Calvin Harris ft. Rihanna;This Is What You Came For;This Is What You Came For;Calvin Harris;This Is What You Came For (feat. Rihanna);https://soundcloud.com/calvinharris/this-is-what-you-came-for-1;100;автоматически выбран;исходный;точный исполнитель + длительность;100;100;0;нет;11
+10;Lady Gaga;Bad Romance (Skrillex Remix);Bad Romance Skrillex Remix;Lady Gaga;Bad Romance (Skrillex Remix);https://soundcloud.com/ladygaga/bad-romance-skrillex-remix;100;автоматически выбран;исходный;точное совпадение исполнителя и названия;100;100;;нет;10
+11;Daft Punk;Get Lucky (Radio Edit) ft. Pharrell Williams;Get Lucky Radio Edit;Daft Punk, Pharrell Williams, Nile Rodgers;Get Lucky (Radio Edit - feat. Pharrell Williams and Nile Rodgers);https://soundcloud.com/daftpunkofficialmusic/get-lucky-radio-edit;96;автоматически выбран;исходный;исполнитель + длительность;100;100;0;нет;-2
+12;Сплин;Выхода нет;Выхода нет;Сплин;Выхода нет;https://soundcloud.com/splin-band/vykhoda-net;100;автоматически выбран;исходный;лучший из 2 похожих;100;100;;нет;0
+13;Macan;ASPHALT 8;ASPHALT 8;MACAN;ASPHALT 8;https://soundcloud.com/macan-sc/asphalt-8;100;автоматически выбран;исходный;лучший из 4 похожих;100;100;;нет;0
+14;Linkin Park;Numb [Official Music Video];Numb;Linkin Park;Numb;https://soundcloud.com/linkinpark/numb;100;автоматически выбран;очищенный;точный исполнитель + длительность;100;100;1;нет;30
+15;Tiësto;The Business;The Business;Tiësto;The Business;https://soundcloud.com/tiesto/the-business-1;100;автоматически выбран;исходный;точный исполнитель + длительность;100;100;0;нет;27
+16;Мумий Тролль;Владивосток 2000;Владивосток 2000;Мумий Тролль;Владивосток 2000;https://soundcloud.com/mumiytroll-music/vladivostok-2000-vladivostok;100;автоматически выбран;транслит;точное совпадение исполнителя и названия;100;100;;нет;20
+17;Avicii;Wake Me Up (Slowed + Reverb);Wake Me Up Slowed + Reverb;Ineegees;Avicii - Wake Me Up (Slowed);https://soundcloud.com/inee01/avicii-wake-me-up-slowed;100;автоматически выбран;исходный;лучший из 7 похожих;100;100;;нет;0

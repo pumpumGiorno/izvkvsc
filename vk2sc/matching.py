@@ -5,6 +5,13 @@
 пропавшие feat.-гости, расхождение длительности. Если длительность известна
 с обеих сторон и совпадает в пределах ±5 сек, оценка подтягивается к 100.
 
+Кроме общей оценки у каждого кандидата считаются отдельные признаки:
+похожесть исполнителя и названия, доля совпавших слов названия (containment),
+разница длительности, конфликт версий, лишние гости и слова. auto_pick()
+принимает решение по их совокупности (правила A–D, см. _accept_rule), а не по
+одному порогу: точный исполнитель + совпавшая длительность позволяют названию
+отличаться сильнее, но никогда не отменяют проверку версии.
+
 auto_pick() выбирает кандидата без участия человека (обычный режим),
 decide() — прежняя логика с вопросами для режима --interactive.
 """
@@ -16,6 +23,7 @@ from dataclasses import asdict, dataclass, replace
 from typing import Iterable, Optional
 
 from rapidfuzz import fuzz
+from rapidfuzz.distance import Levenshtein
 
 from .normalize import (
     SOFT_TAGS,
@@ -24,6 +32,7 @@ from .normalize import (
     has_cyrillic,
     parse_artist,
     parse_title,
+    simplify,
     strip_username_suffix,
     translit,
     translit_skeleton,
@@ -33,7 +42,7 @@ from .tracks import Track
 
 # Меняется при любом изменении оценки/выбора: записи state.json со старой версией
 # можно пересчитать (--rematch), не трогая ручной выбор.
-MATCHING_VERSION = 2
+MATCHING_VERSION = 3
 
 AUTO_THRESHOLD = 85  # не ниже — добавляем без вопросов
 MEDIUM_BAND = 15  # от порога минус столько — берём, только если кандидат явно лучше остальных
@@ -41,7 +50,25 @@ MEDIUM_MARGIN = 10  # насколько лучший должен опереж�
 TIE_MARGIN = 3  # кандидаты ближе этого к лучшему считаются равными — решают длительность и т. п.
 MIN_ARTIST_SIM = 70  # похожее название при чужом исполнителе автоматически не берём
 MAX_AUTO_DURATION_DIFF = 20  # сек: при большей разнице автоматически не берём
-MAX_VERSION_PENALTY_MEDIUM = 10  # в средней зоне — никаких признаков другой версии
+VERSION_CONFLICT_PENALTY = 10  # штраф версии от этого значения — это другая запись
+RELAXED_BAND = 25  # правила A–D работают от порога минус столько (по умолчанию от 60)
+BEATS_DURATION = 5  # соперник с длительностью хуже на столько секунд явно проигрывает
+BEATS_SIM = 10  # … или с исполнителем/названием хуже на столько баллов
+
+# Служебные слова не считаются при сравнении наборов слов названия.
+_STOPWORDS = frozenset(
+    "the a an to of and or in on at for is it be my me you your i we our with "
+    "и в во на не с со по а о об я ты мы вы он она за из к у же".split()
+)
+# Слова, из-за которых похожие названия означают разные треки: «The Business» и
+# «The Business, Pt. II», «Intro» и «Intro (Reprise)».
+_PART_MARKERS = frozenset({
+    "pt", "part", "ii", "iii", "iv", "vi", "vii", "viii", "ix", "vol", "volume", "chapter", "ch",
+    "часть", "ч", "reprise", "interlude", "intro", "outro", "skit", "prologue", "epilogue",
+    "snippet", "preview", "teaser", "medley", "megamix", "mashup", "sequel",
+})
+_YEAR_RE = re.compile(r"^(?:19|20)\d\d$")
+_COVER_RE = re.compile(r"\b(?:cover|кавер)\b")
 MIN_SHOW_SCORE = 35  # ниже — кандидат считается мусором
 AMBIGUITY_MARGIN = 5  # соперник ближе этого к лучшему — спрашиваем
 DURATION_TOLERANCE = 5  # сек
@@ -123,17 +150,67 @@ class Scored:
     title: ParsedTitle
     duration_diff: Optional[int]
     artist_sim: float = 0.0
-    title_sim: float = 0.0
+    title_sim: float = 0.0  # итоговое сходство названий (см. TitleMatch.score)
     version_penalty: float = 0.0
     extra_words: int = 0  # слов в названии кандидата, которых нет в исходнике
+    title_fuzzy: float = 0.0  # только нечёткое сравнение строк
+    containment: float = 0.0  # доля слов кандидата, которые есть в названии из VK
+    coverage: float = 0.0  # доля слов из VK, которые есть у кандидата
+    title_conflict: bool = False  # «Pt. II», «2», «Interlude» — похоже на другой трек
+    artist_exact: bool = False  # набор исполнителей совпал полностью (порядок не важен)
+    feat_penalty: float = 0.0  # лишние/пропавшие feat.-гости
+
+    # Названия признаков как в отчёте и логе.
+    @property
+    def overall_score(self) -> int:
+        return self.score
+
+    @property
+    def artist_score(self) -> float:
+        return self.artist_sim
+
+    @property
+    def title_score(self) -> float:
+        return self.title_sim
+
+    @property
+    def duration_delta(self) -> Optional[int]:
+        return self.duration_diff
+
+    @property
+    def version_conflict(self) -> bool:
+        return self.version_penalty >= VERSION_CONFLICT_PENALTY
+
+    @property
+    def extra_artist_penalty(self) -> float:
+        return self.feat_penalty
+
+    @property
+    def extra_title_noise(self) -> int:
+        return self.extra_words
+
+    def metrics(self) -> dict:
+        """Признаки для state.json, отчёта и лога."""
+        return {
+            "score": self.score,
+            "title": round(self.title_sim),
+            "artist": round(self.artist_sim),
+            "duration_delta": self.duration_diff,
+            "version_conflict": self.version_conflict,
+            "title_conflict": self.title_conflict,
+            "containment": round(self.containment, 2),
+            "artist_exact": self.artist_exact,
+        }
 
     @property
     def tie_key(self) -> tuple:
-        """Выбор среди почти равных: ближе длительность, точнее исполнитель, меньше
-        лишних слов, официальная загрузка, популярность. id — для полной детерминированности."""
+        """Выбор среди почти равных: ближе длительность (по полосам 0–2, 3–5, 6–10, 11–20 с,
+        чтобы секунда разницы не перевешивала точного исполнителя), точнее версия, исполнитель,
+        меньше лишних слов, официальная загрузка, популярность. id — для детерминированности."""
         diff = self.duration_diff if self.duration_diff is not None else 10_000
-        return (diff, -round(self.artist_sim), self.extra_words, not self.uploader_match,
-                -self.candidate.playback_count, -self.score, self.candidate.id)
+        band = next((i for i, limit in enumerate((2, 5, 10, 20)) if diff <= limit), 4)
+        return (band, self.version_penalty, not self.artist_exact, -round(self.artist_sim), diff, self.extra_words,
+                not self.uploader_match, -self.candidate.playback_count, -self.score, self.candidate.id)
 
     @property
     def sort_key(self) -> tuple:
@@ -145,6 +222,9 @@ class Decision:
     kind: str  # "auto" | "ask" | "low" | "none"
     ranked: list[Scored]
     reason: str = ""
+    # Принят уверенно (score ≥ порога или правило A–D с совпавшей длительностью):
+    # искать дальше незачем. Средняя зона без длительности — не уверенно.
+    confident: bool = False
 
     @property
     def best(self) -> Optional[Scored]:
@@ -182,6 +262,95 @@ def title_similarity(vk: ParsedTitle, cand: ParsedTitle) -> float:
     return max(_sim(vk.core_full, cand.core_full), 0.97 * _sim(vk.core, cand.core))
 
 
+@dataclass(frozen=True)
+class TitleMatch:
+    score: float  # итоговое сходство 0–100
+    fuzzy: float  # нечёткое сравнение строк (ratio / token_sort, с транслитом)
+    containment: float  # доля слов кандидата, которые есть в исходнике
+    coverage: float  # доля слов исходника, которые есть у кандидата
+    extra: int  # слов у кандидата, которых нет в исходнике
+    conflict: bool  # в «лишних» словах есть номер части, «Interlude» и т. п.
+
+
+def _content_tokens(title: ParsedTitle) -> list[str]:
+    tokens = title.core_full.split()
+    return [t for t in tokens if t not in _STOPWORDS] or tokens
+
+
+def _token_match(tok: str, others: Iterable[str]) -> bool:
+    """Слово есть среди других: точно, с опечаткой, слитно («citygirls» ⊃ «girls») или в транслите."""
+    for o in others:
+        if tok == o:
+            return True
+        a, b = tok, o
+        if has_cyrillic(a) != has_cyrillic(b):
+            a, b = translit_skeleton(a), translit_skeleton(b)
+            if a == b:
+                return True
+        if len(a) >= 4 and len(b) >= 4 and (a in b or b in a or fuzz.ratio(a, b) >= 85):
+            return True
+    return False
+
+
+def _cover(tokens: list[str], others: list[str]) -> float:
+    if not tokens:
+        return 0.0
+    return sum(_token_match(t, others) for t in tokens) / len(tokens)
+
+
+def title_match(vk: ParsedTitle, cand: ParsedTitle, ignore: Iterable[str] = ()) -> TitleMatch:
+    """Сходство названий по нескольким метрикам сразу.
+
+    fuzzy — прежнее нечёткое сравнение; к нему добавляются нормализованная
+    редакционная похожесть и, если все слова кандидата есть в исходнике,
+    token set («Girls Just Want to Have Fun» ⊂ «Gotham CityGirls Just Want to Have Fun»).
+    Если лишние слова есть у кандидата («Love» → «Love Story»), token set не
+    учитывается: такое совпадение подозрительнее. ignore — слова имён исполнителей,
+    которые не считаются лишними («Artist - Track»).
+    """
+    fuzzy = title_similarity(vk, cand)
+    vt, ct = _content_tokens(vk), _content_tokens(cand)
+    compact_vk, compact_cand = vk.core_full.replace(" ", ""), cand.core_full.replace(" ", "")
+    containment, coverage = _cover(ct, vt), _cover(vt, ct)
+    ignored = set(ignore)
+    cand_extra = [t for t in ct if t not in ignored and not _token_match(t, vt)]
+    if len(compact_cand) >= 5 and compact_cand in compact_vk:
+        containment, cand_extra = 1.0, []
+    if len(compact_vk) >= 5 and compact_vk in compact_cand:
+        coverage = 1.0
+    # Конфликт ищем по всему названию вместе со скобками: «Song (Part 2)» и «Song Part 2» — одно и то же.
+    vk_all = vk.core_full.split() + vk.extra.split()
+    cand_all = cand.core_full.split() + cand.extra.split()
+    differing = [t for t in cand_all if t not in ignored and not _token_match(t, vk_all)] + \
+                [t for t in vk_all if t not in ignored and not _token_match(t, cand_all)]
+    conflict = any(t in _PART_MARKERS or (t.isdigit() and not _YEAR_RE.match(t)) for t in differing)
+    score = fuzzy
+    if compact_vk and compact_cand:
+        score = max(score, 100 * Levenshtein.normalized_similarity(compact_vk, compact_cand))
+    if ct and not cand_extra:
+        tset = fuzz.token_set_ratio(" ".join(vt), " ".join(ct))
+        score = max(score, (fuzzy + tset) / 2)
+    return TitleMatch(score=score, fuzzy=fuzzy, containment=containment, coverage=coverage,
+                      extra=len(cand_extra), conflict=conflict)
+
+
+def artist_names(artist: ParsedArtist, title: ParsedTitle) -> list[str]:
+    """Все исполнители трека: основные, feat. из поля исполнителя и из названия."""
+    return list(dict.fromkeys(list(artist.names) + list(artist.feats) + list(title.feats)))
+
+
+def artists_exact(vk: list[str], cand: list[str], similarity: float) -> bool:
+    """Наборы исполнителей совпадают целиком: «Bladee, Ecco2k» = «Ecco2k & Bladee»."""
+    if not vk or not cand:
+        return False
+    if len(vk) == 1 and len(cand) == 1:
+        return similarity >= 95  # учитывает «ImagineDragonsOfficial», транслит
+    if len(vk) != len(cand):
+        return False
+    return all(max(_sim(v, c) for c in cand) >= 90 for v in vk) and \
+        all(max(_sim(c, v) for v in vk) >= 90 for c in cand)
+
+
 def _version_author(extra: str) -> str:
     """«skrillex remix» → «skrillex»: остаётся автор версии без служебных слов."""
     return re.sub(r"\s+", " ", _VERSION_WORDS_RE.sub(" ", extra)).strip()
@@ -214,33 +383,46 @@ def version_penalty(vk: ParsedTitle, cand: ParsedTitle) -> float:
     return penalty
 
 
+def _known_artist(name: str, known: list[str]) -> bool:
+    """Исполнитель есть в списке — с учётом аккаунтов вида «ImagineDragonsOfficial», «Lady Gaga VEVO»."""
+    stripped = strip_username_suffix(name)
+    return any(_sim(name, k) >= 80 or _sim(stripped, k.replace(" ", "")) >= 80 for k in known)
+
+
 def feat_penalty(vk_artist: ParsedArtist, vk_title: ParsedTitle, cand_artist: ParsedArtist, cand_title: ParsedTitle) -> float:
+    """Лишние и пропавшие исполнители: лишний feat.-гость −8, лишний основной исполнитель −10
+    («FACE & Молчат Дома», «Yung Lean x Beach House» — обычно мэшап или другая запись),
+    пропавший гость −3."""
     vk_everyone = list(vk_artist.names) + list(vk_artist.feats) + list(vk_title.feats)
     cand_everyone = list(cand_artist.names) + list(cand_artist.feats) + list(cand_title.feats)
     cand_feats = list(cand_artist.feats) + list(cand_title.feats)
     vk_feats = list(vk_artist.feats) + list(vk_title.feats)
     extra = any(max((_sim(f, v) for v in vk_everyone), default=0) < 80 for f in cand_feats)
+    extra_main = len(cand_artist.names) > 1 and any(not _known_artist(n, vk_everyone) for n in cand_artist.names)
     # В названиях загрузок гостей часто опускают, поэтому их отсутствие штрафуем слабее.
     cand_text = " ".join([cand_artist.full, cand_title.core_full, cand_title.extra])
     missing = any(
         max((_sim(f, c) for c in cand_everyone), default=0) < 80 and f not in cand_text
         for f in vk_feats
     )
-    return 8 * extra + 3 * missing
+    return 8 * extra + 10 * extra_main + 3 * missing
 
 
 def duration_adjust(score: float, diff: Optional[int], names_match: bool = True) -> float:
-    """≤5 с — сильный плюс, ≤10 с — небольшой, 10–20 с — небольшой штраф, дальше — сильный."""
+    """0–2 с — очень сильный плюс, 3–5 с — сильный, 6–10 с — умеренный,
+    11–20 с — небольшой штраф, дальше — сильный штраф.
+
+    Плюс даётся, только если названия и исполнитель и так похожи: совпавшая
+    длительность подтверждает похожие названия, но не спасает непохожие."""
     if diff is None:
         return score
-    if diff <= DURATION_TOLERANCE:
-        # Совпавшая длительность подтверждает похожие названия, но не спасает непохожие:
-        # «The Business» и «The Business, Pt. II» могут оказаться одной длины.
-        return score + (100 - score) * 0.3 if names_match else score
     if diff <= 10:
-        return score + (100 - score) * 0.1 if names_match else score
+        if not names_match:
+            return score
+        boost = 0.45 if diff <= 2 else 0.3 if diff <= DURATION_TOLERANCE else 0.15
+        return score + (100 - score) * boost
     if diff <= 20:
-        return score - (diff - 10) * 0.5
+        return score - (diff - 10) * 0.8
     if diff <= 45:
         return score - 5 - (diff - 20)
     return score - 40
@@ -258,11 +440,13 @@ def _views(cand: Candidate) -> Iterable[tuple[ParsedArtist, ParsedTitle, bool]]:
         left, right = parts
         for artist_part, title_part in ((left, right), (right, left)):
             t = parse_title(title_part)
-            # Пометки версии могут стоять и в «исполнительской» половине: «хочешь? - земфира (speed up)».
+            # Пометки версии могут стоять и в «исполнительской» половине: «хочешь? - земфира (speed up)»,
+            # «Obedient - Bladee & Ecco2k Sygillain cover».
             a = parse_title(artist_part)
+            half_tags = {"cover"} if _COVER_RE.search(simplify(artist_part)) else set()
             t = replace(
                 t,
-                tags=t.tags | a.tags | slug_tags,
+                tags=t.tags | a.tags | slug_tags | half_tags,
                 extra=" ".join(x for x in (t.extra, a.extra) if x),
                 feats=tuple(dict.fromkeys(t.feats + a.feats)),
             )
@@ -275,28 +459,34 @@ def score_candidate(track: Track, cand: Candidate) -> Scored:
     diff = abs(track.duration - cand.duration) if track.duration and cand.duration else None
 
     vk_words = set(f"{vk_title.core_full} {vk_title.extra} {vk_artist.full} {' '.join(vk_title.feats)}".split())
+    vk_names = artist_names(vk_artist, vk_title)
     # «Artist — 320», «Taylor Swift — 22»: число совпадает только с тем же числом.
     numeric_title = vk_title.core.replace(" ", "").isdigit()
 
     best: Optional[tuple] = None
     for c_artist, c_title, from_uploader in _views(cand):
         a = artist_similarity(vk_artist, c_artist, c_title)
-        t = title_similarity(vk_title, c_title)
+        tm = title_match(vk_title, c_title, ignore=vk_artist.full.split() + c_artist.full.split())
+        t = tm.score
         vp = version_penalty(vk_title, c_title)
+        fp = feat_penalty(vk_artist, vk_title, c_artist, c_title)
         # Название штрафуем круче исполнителя: «The Business» vs «The Business Pt II» — разные песни.
         s = 0.45 * a + 0.55 * max(0.0, 100 - 2 * (100 - t))
         s -= vp
-        s -= feat_penalty(vk_artist, vk_title, c_artist, c_title)
-        s = duration_adjust(s, diff, names_match=t >= 90 and a >= 80 and vp < MAX_VERSION_PENALTY_MEDIUM)
+        s -= fp
+        words_match = t >= 75 or (tm.containment >= 0.8 and tm.coverage >= 0.6)
+        s = duration_adjust(s, diff, names_match=a >= 80 and words_match
+                            and vp < VERSION_CONFLICT_PENALTY and not tm.conflict)
         if numeric_title and c_title.core.replace(" ", "") != vk_title.core.replace(" ", ""):
             s = min(s, MIN_SHOW_SCORE + 15)
         uploader_match = from_uploader and a >= 85
         if best is None or (s, uploader_match) > (best[0], best[1]):
             extra = set(f"{c_title.core_full} {c_title.extra}".split()) - vk_words - set(c_artist.full.split())
-            best = (s, uploader_match, c_title, a, t, vp, len(extra))
+            exact = artists_exact(vk_names, artist_names(c_artist, c_title), a)
+            best = (s, uploader_match, c_title, a, tm, vp, len(extra), exact, fp)
 
     assert best is not None
-    score, uploader_match, parsed, a, t, vp, extra_words = best
+    score, uploader_match, parsed, a, tm, vp, extra_words, exact, fp = best
     if cand.policy == "BLOCK":
         score -= 10
     return Scored(
@@ -306,9 +496,15 @@ def score_candidate(track: Track, cand: Candidate) -> Scored:
         title=parsed,
         duration_diff=diff,
         artist_sim=a,
-        title_sim=t,
+        title_sim=tm.score,
         version_penalty=vp,
         extra_words=extra_words,
+        title_fuzzy=tm.fuzzy,
+        containment=tm.containment,
+        coverage=tm.coverage,
+        title_conflict=tm.conflict,
+        artist_exact=exact,
+        feat_penalty=fp,
     )
 
 
@@ -357,52 +553,146 @@ def decide(track: Track, ranked: list[Scored], auto_threshold: int = AUTO_THRESH
 
 
 def _auto_ok(s: Scored) -> bool:
-    """Жёсткие условия автоматического выбора — одной похожести названия мало."""
+    """Жёсткие условия: при их нарушении кандидат не выбирается никаким правилом."""
     if s.duration_diff is not None and s.duration_diff > MAX_AUTO_DURATION_DIFF:
         return False
-    return s.artist_sim >= MIN_ARTIST_SIM
+    return s.artist_sim >= MIN_ARTIST_SIM and not s.version_conflict and not s.title_conflict
+
+
+def _same_version(a: Scored, b: Scored) -> bool:
+    """Одна версия песни: те же теги (radio edit и т. п. не в счёт) и не разные авторы ремикса.
+    «(Slowed)» и «(Slowed TikTok Version)» — одна версия; «(A Remix)» и «(B Remix)» — разные."""
+    if a.title.tags - SOFT_TAGS != b.title.tags - SOFT_TAGS:
+        return False
+    va, vb = _version_author(a.title.extra), _version_author(b.title.extra)
+    return not (va and vb and _sim(va, vb) < 70)
+
+
+def _beats(best: Scored, rival: Scored) -> bool:
+    """best однозначно лучше соперника по признакам, даже если общие оценки близки."""
+    if not _auto_ok(rival) or rival.version_penalty > best.version_penalty:
+        return True
+    if best.duration_diff is not None and rival.duration_diff is not None \
+            and rival.duration_diff >= best.duration_diff + BEATS_DURATION:
+        return True
+    return rival.artist_sim <= best.artist_sim - BEATS_SIM or rival.title_sim <= best.title_sim - BEATS_SIM
+
+
+def _accept_rule(s: Scored) -> Optional[str]:
+    """Правила, при которых сильные признаки позволяют названию отличаться сильнее.
+
+    Все требуют известной длительности и отсутствия конфликта версий/частей.
+    A: исполнитель ≥92, длительность ±5 с, название ≥75 (≥70 при точном наборе
+       исполнителей или длительности ±2 с);
+    B: исполнитель ≥85, длительность ±8 с, название ≥80;
+    C: название ≥92, исполнитель ≥75, длительность ±10 с;
+    D: исполнитель ≥95, длительность ±2 с, ≥65% слов кандидата есть в названии
+       из VK и ≥50% слов из VK есть у кандидата.
+    """
+    d = s.duration_diff
+    if d is None or s.version_conflict or s.title_conflict:
+        return None
+    a, t = s.artist_sim, s.title_sim
+    if a >= 92 and d <= 5 and t >= (70 if s.artist_exact or d <= 2 else 75):
+        return "точный исполнитель + длительность" if s.artist_exact else "исполнитель + длительность"
+    if a >= 85 and d <= 8 and t >= 80:
+        return "исполнитель + название + длительность"
+    if t >= 92 and a >= 75 and d <= 10:
+        return "название + длительность"
+    if a >= 95 and d <= 2 and s.containment >= 0.65 and s.coverage >= 0.5:
+        return "точный исполнитель + точная длительность, слова названия совпадают"
+    return None
+
+
+def _medium_ok(s: Scored) -> bool:
+    """Средняя зона без подтверждения длительностью: исполнитель и название должны быть явными."""
+    if s.version_conflict or s.title_conflict or s.artist_sim < 85:
+        return False
+    if s.duration_diff is not None and s.duration_diff > 10:
+        return False
+    return s.title_sim >= 85 or (s.containment >= 0.8 and s.coverage >= 0.7)
+
+
+def _reject_reason(s: Scored) -> str:
+    if s.version_conflict:
+        return "другая версия"
+    if s.duration_diff is not None and s.duration_diff > 10:
+        return f"длительность отличается на {s.duration_diff} с"
+    if s.artist_sim < MIN_ARTIST_SIM:
+        return "другой исполнитель"
+    if s.title_conflict:
+        return "похоже на другую часть или другой трек"
+    if s.title_sim < 70 and s.containment < 0.65:
+        return "название не совпадает"
+    return f"низкая уверенность ({s.score})"
 
 
 def auto_pick(track: Track, ranked: list[Scored], auto_threshold: int = AUTO_THRESHOLD) -> Decision:
     """Выбор без вопросов. Результат детерминирован: те же кандидаты → тот же трек.
 
-    - Лучший кандидат с оценкой ≥ порога (85) берётся сразу. Если рядом (±3) есть
-      почти такие же, из них берётся ближайший по длительности, затем с более точным
-      исполнителем, меньшим числом лишних слов, официальный, более популярный.
-    - От порога−15 до порога (70–84) — только если нет признаков другой версии,
-      длительность не расходится больше чем на 10 с и лучший опережает любую
-      другую запись хотя бы на 10 баллов.
-    - Иначе "low" (было что-то похожее, но сомнительное) или "none".
+    1. Отсев: другая версия, другая часть трека («Pt. II», «2»), длительность хуже
+       чем на 20 с, чужой исполнитель.
+    2. Лучший из оставшихся — по общей оценке; почти равные (±3) различаются
+       длительностью, версией, точностью исполнителя, лишними словами,
+       официальностью, популярностью.
+    3. Принятие по совокупности признаков:
+       - общая оценка ≥ порога (85);
+       - одно из правил A–D (сильный исполнитель + длительность при менее похожем
+         названии), если лучший явно лучше соперников;
+       - средняя зона (70–84) без длительности — только при явных исполнителе и
+         названии и явном отрыве от соперников.
+    4. Если рядом соперник, которого лучший не превосходит ни длительностью, ни
+       исполнителем, ни названием, а у них разные версии — пропуск.
     """
     shown = [s for s in ranked if s.score >= MIN_SHOW_SCORE]
     if not shown:
         return Decision("none", ranked, "ничего похожего")
     eligible = [s for s in shown if _auto_ok(s)]
     if not eligible:
-        top = shown[0]
-        if top.duration_diff is not None and top.duration_diff > MAX_AUTO_DURATION_DIFF:
-            return Decision("low", shown, f"длительность отличается на {top.duration_diff} с")
-        return Decision("low", shown, "другой исполнитель")
+        return Decision("low", shown, _reject_reason(shown[0]))
     top_score = eligible[0].score
     close = [s for s in eligible if s.score >= top_score - TIE_MARGIN]
     best = min(close, key=lambda s: s.tie_key)
     ordered = [best] + [s for s in shown if s is not best]
 
-    if best.score >= auto_threshold:
-        others = [s for s in close if s is not best and not _same_recording(best, s)]
-        reason = f"лучший из {len(others) + 1} похожих" if others else "уверенное совпадение"
-        return Decision("auto", ordered, reason)
+    rivals = [s for s in shown if s is not best and not _same_recording(best, s)]
+    # Соперники, которых лучший не превосходит явно ни по одному признаку.
+    unresolved = [r for r in rivals if best.score - r.score < MEDIUM_MARGIN and not _beats(best, r)]
+    rule = _accept_rule(best)
 
-    medium = auto_threshold - MEDIUM_BAND
-    if best.score >= medium:
-        if best.title_sim < 85:
-            return Decision("low", ordered, f"название заметно отличается ({best.score})")
-        if best.version_penalty >= MAX_VERSION_PENALTY_MEDIUM:
-            return Decision("low", ordered, f"похоже на другую версию ({best.score})")
-        if best.duration_diff is not None and best.duration_diff > 10:
-            return Decision("low", ordered, f"длительность отличается на {best.duration_diff} с")
-        rivals = [s for s in shown if s is not best and not _same_recording(best, s)]
-        if rivals and best.score - max(r.score for r in rivals) < MEDIUM_MARGIN:
+    if best.score >= auto_threshold:
+        tied = [r for r in unresolved if abs(best.score - r.score) <= TIE_MARGIN and not _same_version(best, r)]
+        if tied:
+            return Decision("low", ordered, "почти равные варианты разных версий")
+        others = [s for s in close if s is not best and not _same_recording(best, s)]
+        if rule:
+            reason = rule
+        elif others:
+            reason = f"лучший из {len(others) + 1} похожих"
+        elif best.title_sim >= 95 and best.artist_sim >= 92:
+            reason = "точное совпадение исполнителя и названия"
+        else:
+            reason = "высокий общий score"
+        return Decision("auto", ordered, reason, confident=True)
+
+    if rule and best.score >= auto_threshold - RELAXED_BAND:
+        if unresolved:
+            return Decision("low", ordered, f"несколько равных вариантов ({best.score})")
+        return Decision("auto", ordered, rule, confident=True)
+
+    if best.score >= auto_threshold - MEDIUM_BAND and _medium_ok(best):
+        if unresolved:
             return Decision("low", ordered, f"несколько равных вариантов ({best.score})")
         return Decision("auto", ordered, "средняя уверенность, других вариантов нет")
-    return Decision("low", ordered, f"низкая уверенность ({best.score})")
+    return Decision("low", ordered, _reject_reason(best))
+
+
+def rival_margin(decision: Decision) -> Optional[int]:
+    """Отрыв лучшего кандидата от лучшей другой записи, которую тоже можно было бы выбрать
+    (отсеянные — другая версия, чужая длительность — не в счёт). Для лога и отчёта."""
+    best = decision.best
+    if best is None:
+        return None
+    rivals = [s.score for s in decision.ranked
+              if s is not best and not _same_recording(best, s) and _auto_ok(s)]
+    return best.score - max(rivals) if rivals else None

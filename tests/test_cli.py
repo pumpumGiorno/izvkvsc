@@ -6,6 +6,7 @@ import json
 import pytest
 
 from vk2sc.cli import main
+from vk2sc.matching import MATCHING_VERSION
 from vk2sc.normalize import simplify
 from vk2sc.soundcloud import RetryExhausted
 
@@ -131,7 +132,8 @@ def test_dry_run_report(workdir):
     assert code == 0
     rows = read_report(workdir / "report.csv")
     assert rows[0] == ["line", "original_artist", "original_title", "search_title", "matched_artist",
-                       "matched_title", "soundcloud_url", "score", "status", "search_variant", "note"]
+                       "matched_title", "soundcloud_url", "score", "status", "search_variant", "note",
+                       "title_score", "artist_score", "duration_delta", "version_conflict", "margin"]
     statuses = [r[STATUS] for r in rows[1:]]
     assert statuses == ["автоматически выбран"] * 3 + ["не найден"]
     assert rows[1][1:4] == ["Imagine Dragons", "Believer (Official Audio)", "Believer"]
@@ -139,6 +141,8 @@ def test_dry_run_report(workdir):
     assert int(rows[1][7]) >= 95
     assert rows[1][9] == "исходный"
     assert rows[4][4:8] == ["", "", "", ""]
+    assert rows[1][11:15] == ["100", "100", "0", "нет"]  # признаки выбранного кандидата
+    assert rows[4][11:] == ["", "", "", "", ""]
     assert client.created == [] and client.updated == []
     assert "Будет добавлено:" in out and "Не найдено:" in out
 
@@ -635,7 +639,8 @@ def test_cascade_retries_with_clean_query_and_logs(workdir):
     assert "  поиск: JDFLAG Track Name (VK.COM)" in out
     assert "результат недостаточно хороший" in out
     assert "повторный поиск (очищенный): JDFLAG Track Name" in out
-    assert "найдено: JDFLAG — Track Name" in out and "→ автоматически выбран" in out
+    assert "лучший вариант: JDFLAG — Track Name" in out and "→ автоматически выбран" in out
+    assert "  duration: +1 сек" in out and "  version conflict: нет" in out
     row = read_report(workdir / "report.csv")[1]
     assert row[1:4] == ["JDFLAG", "Track Name (VK.COM)", "Track Name"]
     assert row[4:7] == ["JDFLAG", "Track Name", good["permalink_url"]]
@@ -753,7 +758,7 @@ def test_state_resume_does_not_search_processed_tracks(workdir):
     write_tracks(workdir / "tracks.txt", BASIC)
     run(["--dry-run"], FakeClient(), interactive=True, inputs=NoInput())
     state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
-    assert {e["algo"] for e in state["tracks"].values()} == {2}
+    assert {e["algo"] for e in state["tracks"].values()} == {MATCHING_VERSION}
     # Все решения (найден, не найден) остаются; второй запуск не делает ни одного запроса.
     again = FakeClient()
     code, out = run(["--dry-run"], again, interactive=True, inputs=NoInput())
@@ -793,7 +798,7 @@ def test_old_algorithm_entries(workdir):
     rematch = FakeClient()
     run(["--dry-run", "--rematch"], rematch, interactive=True, inputs=NoInput())
     state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))["tracks"]
-    assert state["кино — группа крови #1"]["match"]["id"] == 2 and state["кино — группа крови #1"]["algo"] == 2
+    assert state["кино — группа крови #1"]["match"]["id"] == 2 and state["кино — группа крови #1"]["algo"] == MATCHING_VERSION
     # Кэш (кавер) не подошёл: добраны только запросы, которых ещё не было.
     assert rematch.searches == ["kino gruppa krovi", "Группа крови Кино"]
     assert all("Believer" not in q for q in rematch.searches)  # новое решение не пересчитывается
@@ -828,3 +833,69 @@ def test_yo_variant_is_not_deduplicated_away():
 
     variants = dict(search_variants(Track("Ёлка", "Прованс")))
     assert variants["исходный"] == "Ёлка Прованс" and variants["без ё"] == "Елка Прованс"
+
+
+def test_rematch_dry_run_recalculates_v2_results_without_new_export(workdir):
+    """Сценарий: python -m vk2sc --rematch --dry-run -v поверх state.json прошлой версии."""
+    write_tracks(workdir / "tracks.txt", [
+        "Bladee, Ecco2k — Gotham CityGirls Just Want to Have Fun | 2:14",
+        "Кино — Группа крови",
+        "Imagine Dragons — Believer",
+    ])
+    girls = {"id": 50, "title": "Girls just want to have fun", "username": "Bladee, Ecco2k",
+             "url": "https://soundcloud.com/bladee/girls", "duration": 134, "score": 80}
+    remake = {"id": 51, "title": "Bladee & Ecco2k - Girls Just Want to Have Fun (instrumental remake)",
+              "username": "spectre", "url": "https://soundcloud.com/spectre/remake", "duration": 134, "score": 50}
+    reupload = {"id": 52, "title": "bladee & ecco2k - girls just want to have fun", "username": "tk0",
+                "url": "https://soundcloud.com/tk0/girls", "duration": 150, "score": 59}
+    old = {"version": 1, "playlists": [], "pending_create": None, "tracks": {
+        "bladee, ecco2k — gotham citygirls just want to have fun #1": {
+            "source": "Bladee, Ecco2k — Gotham CityGirls Just Want to Have Fun", "status": "low_confidence",
+            "match": None, "reason": "название заметно отличается (80)", "algo": 2,
+            "queries": ["Bladee, Ecco2k Gotham CityGirls Just Want to Have Fun"],
+            "candidates": [girls, remake, reupload]},
+        "кино — группа крови #1": {
+            "source": "Кино — Группа крови", "status": "manual", "algo": 2, "queries": [],
+            "match": {"id": 77, "title": "Группа крови", "username": "x", "url": "u"}, "candidates": []},
+        "imagine dragons — believer #1": {
+            "source": "Imagine Dragons — Believer", "status": "auto", "algo": 2, "queries": ["Imagine Dragons Believer"],
+            "match": dict(CATALOG[0], url=CATALOG[0]["permalink_url"], username="Imagine Dragons", score=100),
+            "candidates": [{"id": 1, "title": "Believer", "username": "Imagine Dragons",
+                            "url": CATALOG[0]["permalink_url"], "duration": 204, "score": 100}]},
+    }}
+    (workdir / "state.json").write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+
+    client = FakeClient()
+    code, out = run(["--rematch", "--dry-run", "-v"], client, interactive=True, inputs=NoInput())
+    assert code == 0 and client.searches == []  # хватило сохранённых кандидатов
+    assert "→ автоматически выбран: точный исполнитель + длительность" in out
+    assert "  artist: 100 (тот же набор исполнителей)" in out and "  duration: +0 сек" in out
+    assert "  version conflict: нет" in out and "  margin: +" in out
+    assert "кандидаты:" in out and "другая версия" in out
+
+    state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))["tracks"]
+    bladee = state["bladee, ecco2k — gotham citygirls just want to have fun #1"]
+    assert bladee["status"] == "auto" and bladee["match"]["id"] == 50 and bladee["algo"] == MATCHING_VERSION
+    assert bladee["metrics"]["artist"] == 100 and bladee["metrics"]["duration_delta"] == 0
+    assert state["кино — группа крови #1"]["match"]["id"] == 77  # ручной выбор не тронут
+    assert state["imagine dragons — believer #1"]["algo"] == MATCHING_VERSION  # пересчитан по --rematch
+
+    row = read_report(workdir / "report.csv")[1]
+    assert row[STATUS] == "автоматически выбран" and row[5] == "Girls just want to have fun"
+    assert row[10].startswith("точный исполнитель") and row[13] == "0" and row[14] == "нет"
+
+
+def test_low_confidence_log_shows_features(workdir):
+    write_tracks(workdir / "tracks.txt", ["Artist — Midnight City Lights | 3:20"])
+
+    class Slowed(FakeClient):
+        def search_tracks(self, query, limit=20):
+            self.searches.append(query)
+            return [sc_track(60, "City Lights (Slowed + Reverb)", "Artist", 200)]
+
+    code, out = run(["--dry-run"], Slowed(), interactive=True, inputs=NoInput())
+    assert "лучший вариант: Artist — City Lights (Slowed + Reverb)" in out
+    assert "  version conflict: да" in out
+    assert "→ пропущен: низкая уверенность (другая версия)" in out
+    row = read_report(workdir / "report.csv")[1]
+    assert row[STATUS] == "пропущен: низкая уверенность" and row[14] == "да"

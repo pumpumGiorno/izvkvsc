@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -24,6 +25,12 @@ HEADER = [
     "status",
     "search_variant",
     "note",
+    # Признаки лучшего кандидата: по ним видно, почему он принят или отвергнут.
+    "title_score",
+    "artist_score",
+    "duration_delta",
+    "version_conflict",
+    "margin",
 ]
 
 # Статусы в отчёте
@@ -121,6 +128,8 @@ def build(tracks: list[Track], keys: list[str], state: State, dry_run: bool,
             reason = e.get("reason")
             if reason and st in (AUTO, LOW, NOT_FOUND) and key not in duplicates:
                 notes.insert(0, reason)
+        m = (e or {}).get("metrics") or {}
+        margin = m.get("margin")
         s.rows.append([
             track.line_no or "",
             track.artist,
@@ -133,12 +142,20 @@ def build(tracks: list[Track], keys: list[str], state: State, dry_run: bool,
             status,
             (shown.variant or "") if shown else "",
             "; ".join(notes),
+            m.get("title", ""),
+            m.get("artist", ""),
+            "" if m.get("duration_delta") is None else m["duration_delta"],
+            {True: "да", False: "нет"}.get(m.get("version_conflict"), ""),
+            "" if margin is None else margin,
         ])
     return s
 
 
 def _safe_cell(value: str) -> str:
-    """Защита от формул в Excel: название трека «=HYPERLINK(…)» задаёт любой загрузивший."""
+    """Защита от формул в Excel: название трека «=HYPERLINK(…)» задаёт любой загрузивший.
+    Числа («-3» в duration_delta) оставляем числами."""
+    if re.fullmatch(r"-?\d+", value):
+        return value
     return "'" + value if value[:1] in ("=", "+", "-", "@", "\t", "\r") else value
 
 

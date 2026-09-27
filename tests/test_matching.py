@@ -348,12 +348,17 @@ def test_auto_pick_is_deterministic():
     assert len(picks) == 1
 
 
-def stub(id, score, duration=None, diff=None, version_penalty=0.0, title="song", title_sim=100.0, artist_sim=100.0):
+def stub(id, score, duration=None, diff=None, version_penalty=0.0, title="song", title_sim=100.0, artist_sim=100.0,
+         containment=None, coverage=None, exact=False, title_conflict=False):
     from vk2sc.normalize import parse_title
     from vk2sc.matching import Scored
+    full = 1.0 if title_sim >= 95 else 0.0
     return Scored(candidate=cand(id, title, "Artist", duration), score=score, uploader_match=True,
                   title=parse_title(title), duration_diff=diff, artist_sim=artist_sim,
-                  title_sim=title_sim, version_penalty=version_penalty)
+                  title_sim=title_sim, version_penalty=version_penalty, title_fuzzy=title_sim,
+                  containment=full if containment is None else containment,
+                  coverage=full if coverage is None else coverage,
+                  artist_exact=exact, title_conflict=title_conflict)
 
 
 def test_medium_confidence_needs_clear_lead():
@@ -386,3 +391,191 @@ def test_numeric_title_matches_only_same_number():
 def test_vk_junk_in_title_does_not_hurt_score():
     track = Track("Imagine Dragons", "Believer (VK.COM) [Reupload]", 204)
     assert score_candidate(track, cand(1, "Believer", "Imagine Dragons", 204)).score >= 95
+
+
+# ---- Решение по совокупности признаков (алгоритм v3) ----
+
+from vk2sc.matching import MATCHING_VERSION, title_match  # noqa: E402
+from vk2sc.normalize import parse_title as _pt  # noqa: E402
+
+
+def test_regression_bladee_gotham_city_girls():
+    """Реальный случай: исполнители и длительность совпадают, название короче — это тот же трек."""
+    track = Track("Bladee, Ecco2k", "Gotham CityGirls Just Want to Have Fun", 134)
+    good = cand(1, "Girls just want to have fun", "Bladee, Ecco2k", 134)
+    scored = score_candidate(track, good)
+    assert scored.artist_exact and scored.artist_sim == 100
+    assert scored.containment == 1.0 and not scored.version_conflict and not scored.title_conflict
+    decision = auto_pick(track, [scored])
+    assert decision.kind == "auto" and decision.best.candidate.id == 1
+    assert "исполнитель" in decision.reason and "длительность" in decision.reason
+
+
+def test_regression_bladee_with_real_search_results():
+    """Выдача SoundCloud по этому треку: рядом ремиксы и инструменталы почти той же длины."""
+    track = Track("Bladee, Ecco2k", "Gotham CityGirls Just Want to Have Fun", 134)
+    decision = pick(track, [
+        cand(1, "Bladee & Ecco2k - Girls Just Want to Have Fun (instrumental remake)", "spectre", 134),
+        cand(2, "bladee & Ecco2K - Girls Just Want To Have Fun - INSWSLLT breakcore remix", "YourLocalCyborg", 136),
+        cand(3, "Bladee & Ecco2k - Girls Just Want To Have Fun (Hughie Flip)", "World Of Hughie", 138),
+        cand(4, "girls just want to have fun - bladee & ecco2k", "tk0", 170),
+        cand(5, "Girls Just Want to Have Fun", "Bladee", 135, publisher="Bladee, Ecco2k"),
+        cand(6, "Girls just want to have fun", "Bladee", 134, publisher="Bladee, Ecco2k"),
+        cand(7, "Bladee & Ecco2k - Girls Just Want to Have Fun (instrumental)", "scvmmrs", 140),
+    ])
+    assert decision.kind == "auto" and decision.best.candidate.id in (5, 6)
+
+
+def test_title_match_metrics():
+    tm = title_match(_pt("Gotham CityGirls Just Want to Have Fun"), _pt("Girls just want to have fun"))
+    assert tm.containment == 1.0 and tm.coverage >= 0.8 and tm.extra == 0 and not tm.conflict
+    assert tm.score > tm.fuzzy  # token set учтён: лишние слова только у VK
+    other_way = title_match(_pt("Love"), _pt("Love Story"))
+    assert other_way.extra == 1 and other_way.score == other_way.fuzzy  # лишнее слово у кандидата — без поблажек
+    assert title_match(_pt("The Business"), _pt("The Business, Pt. II")).conflict
+    assert title_match(_pt("ASPHALT 8"), _pt("ASPHALT 9")).conflict
+    assert not title_match(_pt("Song (2019)"), _pt("Song")).conflict  # год — не номер части
+
+
+def test_artist_set_order_does_not_matter():
+    track = Track("Bladee, Ecco2k", "Obedient", 180)
+    for artists in ("Ecco2k & Bladee", "Ecco2k x Bladee", "Bladee feat. Ecco2k", "Ecco2k + Bladee"):
+        s = score_candidate(track, cand(1, "Obedient", artists, 180))
+        assert s.artist_exact and s.artist_sim >= 95, artists
+    assert not score_candidate(track, cand(1, "Obedient", "Bladee, Thaiboy Digital", 180)).artist_exact
+
+
+def test_a_exact_artist_and_duration_accept_title_around_75():
+    track = Track("Artist", "Midnight City Lights", 200)
+    s = score_candidate(track, cand(1, "City Lights", "Artist", 201))
+    assert 70 <= s.title_fuzzy < 80  # по одной строковой метрике — «сомнительно»
+    assert pick(track, [cand(1, "City Lights", "Artist", 201)]).kind == "auto"
+
+
+def test_b_exact_artist_and_duration_but_slowed_reverb_is_rejected():
+    track = Track("Artist", "Midnight City Lights", 200)
+    decision = pick(track, [cand(1, "City Lights (Slowed + Reverb)", "Artist", 200)])
+    assert decision.kind == "low" and decision.reason == "другая версия"
+
+
+def test_c_other_artist_same_duration_is_rejected():
+    track = Track("Artist", "Midnight City Lights", 200)
+    decision = pick(track, [cand(1, "City Lights", "Somebody Else", 200)])
+    assert decision.kind != "auto"
+
+
+def test_d_exact_artist_but_duration_off_by_50s_is_rejected():
+    track = Track("Artist", "Midnight City Lights", 200)
+    decision = pick(track, [cand(1, "City Lights", "Artist", 250)])
+    assert decision.kind == "low" and "длительность" in decision.reason
+
+
+def test_e_clear_lead_with_strong_artist_and_duration():
+    track = Track("Artist", "Song")
+    decision = auto_pick(track, [stub(1, 80, duration=200, diff=0, title_sim=78, containment=1.0, coverage=0.8,
+                                      exact=True),
+                                 stub(2, 55, duration=260, diff=60, title="song b")])
+    assert decision.kind == "auto" and decision.best.candidate.id == 1
+    assert "исполнитель" in decision.reason
+
+
+def test_f_near_equal_scores_decided_by_version_and_duration():
+    track = Track("Artist", "Song (Slowed)")
+    # Первый по общему score — другая версия: его нельзя брать только потому, что он первый.
+    wrong_version = stub(1, 80, duration=200, diff=0, title_sim=90, version_penalty=30)
+    right_version = stub(2, 79, duration=201, diff=1, title_sim=90, title="song (slowed)")
+    decision = auto_pick(track, [wrong_version, right_version])
+    assert decision.kind == "auto" and decision.best.candidate.id == 2
+    # Те же версии, почти равный score — решает длительность, а не место в выдаче.
+    far = stub(3, 80, duration=212, diff=12, title_sim=90)
+    near = stub(4, 79, duration=201, diff=1, title_sim=90)
+    assert auto_pick(track, [far, near]).best.candidate.id == 4
+
+
+def test_near_equal_different_versions_without_tiebreaker_are_skipped():
+    track = Track("Artist", "Song")
+    a = stub(1, 88, duration=200, title="song (a remix)", title_sim=100)
+    b = stub(2, 87, duration=230, title="song (b remix)", title_sim=100)
+    assert auto_pick(track, [a, b]).kind == "low"
+
+
+def test_rule_needs_clear_lead():
+    track = Track("Artist", "Song", 200)
+    best = stub(1, 80, duration=200, diff=0, title_sim=78, exact=True)
+    rival = stub(2, 78, duration=199, diff=1, title_sim=78, title="another song", exact=True)
+    assert auto_pick(track, [best, rival]).kind == "low"  # равный соперник другой записи — не угадываем
+
+
+def test_number_or_part_in_title_is_another_track():
+    track = Track("Blur", "Song", 122)
+    assert pick(track, [cand(1, "Song 2", "Blur", 122)]).kind != "auto"
+    track = Track("Macan", "ASPHALT 8", 136)
+    assert pick(track, [cand(1, "ASPHALT 9", "Macan", 136)]).kind != "auto"
+    track = Track("Kanye West", "Stronger", 311)
+    assert pick(track, [cand(1, "Stronger Interlude", "Kanye West", 311)]).kind != "auto"
+
+
+def test_duration_strongly_raises_confidence():
+    track = Track("Artist", "Midnight City Lights", 200)
+    scores = [score_candidate(track, cand(1, "City Lights", "Artist", 200 + d)).score for d in (1, 4, 8, 15, 30)]
+    assert scores == sorted(scores, reverse=True) and scores[0] - scores[2] >= 3 and scores[3] < scores[2]
+    no_duration = score_candidate(Track("Artist", "Midnight City Lights"), cand(1, "City Lights", "Artist"))
+    assert scores[0] > no_duration.score
+
+
+def test_matching_version_bumped():
+    assert MATCHING_VERSION >= 3
+
+
+# ---- Случаи из живой выдачи SoundCloud (сравнение v2 → v3) ----
+
+
+def test_cover_marker_in_artist_half_of_title():
+    track = Track("Bladee", "Obedient", 177)
+    decision = pick(track, [
+        cand(1, "Obedient - Bladee & Ecco2k Sygillain cover", "sygillain", 174),
+        cand(2, "Obedient ft. ECCO2K", "bladee", 180),
+    ])
+    assert decision.kind == "auto" and decision.best.candidate.id == 2
+    assert score_candidate(track, cand(1, "Obedient - Bladee & Ecco2k Sygillain cover", "sygillain", 174)).version_conflict
+
+
+def test_extra_main_artist_is_penalized_like_mashup():
+    track = Track("FACE", "Юморист", 163)
+    decision = pick(track, [
+        cand(1, "FACE & Молчат Дома – ЮМОРИСТ", "DK FJKO", 144),
+        cand(2, "ЮМОРИСТ", "FACE", 143),
+    ])
+    assert decision.kind == "auto" and decision.best.candidate.id == 2
+    mashup = score_candidate(Track("Yung Lean", "Ginseng Strip 2002", 195),
+                             cand(1, "Yung Lean x BEACH HOUSE - Ginseng Strip 2002", "Yung Lean", 175))
+    assert mashup.feat_penalty >= 10
+    assert auto_pick(Track("Yung Lean", "Ginseng Strip 2002", 195), [mashup]).kind == "low"
+
+
+def test_official_account_suffix_is_not_an_extra_artist():
+    track = Track("Imagine Dragons", "Believer", 204)
+    for user in ("ImagineDragonsOfficial", "Imagine Dragons VEVO", "Imagine Dragons"):
+        assert score_candidate(track, cand(1, "Believer", user, 204)).feat_penalty == 0, user
+
+
+def test_matching_version_marker_beats_exact_artist_set_in_tie():
+    """VK «(Radio Edit)»: официальный Radio Edit с лишним гостем лучше перезалива без пометки."""
+    track = Track("Daft Punk", "Get Lucky (Radio Edit) ft. Pharrell Williams", 248)
+    decision = pick(track, [
+        cand(1, "Get Lucky - Daft Punk ft. Pharrell Williams", "Steel Strum", 247),
+        cand(2, "Get Lucky (Radio Edit - feat. Pharrell Williams and Nile Rodgers)", "Daft Punk", 248,
+             publisher="Daft Punk, Pharrell Williams, Nile Rodgers"),
+        cand(3, "Daft Punk - Get Lucky Ft. Pharrell Williams, Nile Rodgers", "NearlyNinja", 241),
+    ])
+    assert decision.kind == "auto" and decision.best.candidate.id == 2
+
+
+def test_same_slowed_version_with_extra_words_is_not_ambiguous():
+    track = Track("Avicii", "Wake Me Up (Slowed + Reverb)")
+    decision = pick(track, [
+        cand(1, "Avicii - Wake Me Up (Slowed)", "Ineegees", 310),
+        cand(2, "Wake Me Up - Avicii (SLOWED TIKTOK VERSION)", "Emil Berg", 290),
+        cand(3, "Avicii - Wake Me Up (slowed + reverb)", "Slade", 302),
+    ])
+    assert decision.kind == "auto"

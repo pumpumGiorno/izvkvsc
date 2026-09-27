@@ -27,6 +27,7 @@ from .matching import (
     auto_pick,
     decide,
     rank,
+    rival_margin,
     score_candidate,
 )
 from .normalize import (
@@ -182,6 +183,13 @@ def search_variants(track: Track) -> list[tuple[str, str]]:
 
 def build_queries(track: Track) -> list[str]:
     return [q for _, q in search_variants(track)]
+
+
+def signed_duration(track: Track, cand: Candidate) -> Optional[str]:
+    """«+0 сек», «-3 сек» — насколько кандидат длиннее трека из VK; None — длительность неизвестна."""
+    if not track.duration or not cand.duration:
+        return None
+    return f"{cand.duration - track.duration:+d} сек"
 
 
 class Runner:
@@ -340,45 +348,71 @@ class Runner:
         if self.manual:
             decision = decide(track, ranked, self.args.threshold)
             if decision.kind == "auto":
-                self.report_choice(decision.best, decision)
-                self.save(key, track, AUTO, decision.best, ranked, queries, decision.reason)
+                metrics = self.explain(track, decision)
+                self.out("  → автоматически выбран")
+                self.save(key, track, AUTO, decision.best, ranked, queries, decision.reason, metrics)
             else:
                 status, chosen, ranked = self.ask(track, decision, queries)
                 self.save(key, track, status, chosen, ranked, queries, decision.reason)
             return
 
         decision = auto_pick(track, ranked, self.args.threshold)
-        self.show_verbose(decision.ranked)
+        self.show_verbose(track, decision.ranked)
+        metrics = self.explain(track, decision)
         if decision.kind == "auto":
-            self.report_choice(decision.best, decision)
-            self.save(key, track, AUTO, decision.best, decision.ranked, queries, decision.reason)
+            self.out(f"  → автоматически выбран: {decision.reason}")
+            self.save(key, track, AUTO, decision.best, decision.ranked, queries, decision.reason, metrics)
         elif decision.kind == "low":
-            best = decision.best
-            self.out(f"  лучший вариант: {report.describe(best.candidate)}, score {best.score}")
             self.out(f"  → пропущен: низкая уверенность ({decision.reason})")
-            self.save(key, track, LOW, None, decision.ranked, queries, decision.reason)
+            self.save(key, track, LOW, None, decision.ranked, queries, decision.reason, metrics)
         else:
             self.out("  → не найден")
             self.save(key, track, NOT_FOUND, None, decision.ranked, queries, decision.reason)
 
-    def report_choice(self, best: Scored, decision: Decision) -> None:
-        self.out(f"  найдено: {report.describe(best.candidate)}")
+    def explain(self, track: Track, decision: Decision) -> Optional[dict]:
+        """Печатает признаки лучшего кандидата — по ним видно, почему он принят или отвергнут."""
+        best = decision.best
+        if best is None or decision.kind == "none":
+            return None
+        metrics = best.metrics()
+        metrics["margin"] = rival_margin(decision)
+        if track.duration and best.candidate.duration:
+            metrics["duration_delta"] = best.candidate.duration - track.duration  # со знаком, как в логе
+        self.out(f"  лучший вариант: {report.describe(best.candidate)}")
         self.out(f"  score: {best.score}")
-        note = f" ({decision.reason})" if decision.reason and decision.reason != "уверенное совпадение" else ""
-        self.out(f"  → автоматически выбран{note}")
+        self.out(f"  title: {metrics['title']}" + (f" (слов совпало: {best.containment:.0%})"
+                                                  if best.title_fuzzy < best.title_sim - 1 else ""))
+        self.out(f"  artist: {metrics['artist']}" + (" (тот же набор исполнителей)" if best.artist_exact else ""))
+        self.out(f"  duration: {signed_duration(track, best.candidate) or 'неизвестна'}")
+        self.out(f"  version conflict: {'да' if best.version_conflict else 'нет'}"
+                 + ("; похоже на другую часть трека" if best.title_conflict else ""))
+        margin = metrics["margin"]
+        self.out(f"  margin: {f'{margin:+d}' if margin is not None else 'других вариантов нет'}")
+        return metrics
 
-    def show_verbose(self, ranked: list[Scored]) -> None:
+    def show_verbose(self, track: Track, ranked: list[Scored]) -> None:
         if not self.args.verbose or not ranked:
             return
         self.out("  кандидаты:")
-        self.show(ranked[:SHOW_CANDIDATES])
+        for n, s in enumerate(ranked[:SHOW_CANDIDATES], 1):
+            c = s.candidate
+            flags = []
+            if s.version_conflict:
+                flags.append("другая версия")
+            if s.title_conflict:
+                flags.append("другая часть")
+            if s.artist_exact:
+                flags.append("те же исполнители")
+            tail = f" [{', '.join(flags)}]" if flags else ""
+            self.out(f"   {n}. {c.display}  score {s.score} · title {round(s.title_sim)} · "
+                     f"artist {round(s.artist_sim)} · {signed_duration(track, c) or 'длительность ?'}{tail}  {c.url}")
 
     def good_enough(self, track: Track, collected: list[Candidate], remaining: list[tuple[str, str]]) -> bool:
         """Хватит ли уже найденного, чтобы больше не искать."""
         if not collected:
             return False
         decision = auto_pick(track, rank(track, collected), self.args.threshold)
-        if decision.kind != "auto" or decision.best.score < self.args.threshold:
+        if decision.kind != "auto" or not decision.confident:
             return False
         # Перезаливку от случайного пользователя считаем достаточной, только если
         # другое написание (транслит, без «ё») не нашло загрузку с аккаунта исполнителя.
@@ -414,7 +448,8 @@ class Runner:
         return collected, used
 
     def save(self, key: str, track: Track, status: str, chosen: Optional[Scored],
-             ranked: list[Scored], queries: list[str], reason: str = "") -> None:
+             ranked: list[Scored], queries: list[str], reason: str = "",
+             metrics: Optional[dict] = None) -> None:
         match = None
         if chosen is not None:
             match = chosen.candidate.to_dict()
@@ -432,6 +467,7 @@ class Runner:
             "candidates": candidates,
             "queries": queries,
             "reason": reason,
+            "metrics": metrics,  # признаки лучшего кандидата: title, artist, duration_delta, margin…
             "algo": MATCHING_VERSION,
         })
 
