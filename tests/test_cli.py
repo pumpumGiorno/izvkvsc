@@ -980,3 +980,35 @@ def test_same_title_without_mark_is_not_adopted(workdir, monkeypatch):
     client.remote_playlists = [{"id": 900, "title": "Из VK", "description": "", "tracks": [{"id": 1}], "track_count": 1}]
     code, _ = run(["--title", "Из VK", "--yes"], client, interactive=True, inputs=NoInput())
     assert code == 0 and client.created == [("Из VK", [1], "private")]
+
+
+def test_stale_pending_create_plus_browser_script_does_not_loop(workdir, monkeypatch):
+    """Порядок пользователя: неудачная попытка через API (осталась отметка pending_create),
+    потом браузерный скрипт, потом снова python -m vk2sc — обновлять больше нечего."""
+    monkeypatch.setenv("SOUNDCLOUD_OAUTH_TOKEN", "secret-token-value")
+    write_tracks(workdir / "tracks.txt", BASIC[:3])
+    run(["--dry-run"], FakeClient())
+    state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
+    state["pending_create"] = {"title": "Из VK", "started_at": 1_790_000_000}
+    (workdir / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    client = FakeClient()
+    client.remote_playlists = [{"id": 901, "title": "Из VK", "description": "Перенесено из VK (vk2sc)",
+                                "created_at": "2026-09-27T12:00:00Z", "tracks": [{"id": 1}, {"id": 2}, {"id": 3}],
+                                "track_count": 3}]
+    code, out = run(["--title", "Из VK"], client, interactive=True, inputs=NoInput())
+    assert code == 0 and client.created == [] and client.updated == []
+    assert "уже в актуальном состоянии" in out
+    assert [r[STATUS] for r in read_report(workdir / "report.csv")[1:]] == ["добавлен"] * 3
+
+
+def test_known_playlist_updated_in_browser_is_not_updated_again(workdir, monkeypatch):
+    monkeypatch.setenv("SOUNDCLOUD_OAUTH_TOKEN", "secret-token-value")
+    write_tracks(workdir / "tracks.txt", BASIC[:2])
+    run(["--title", "Из VK", "--yes"], FakeClient(), interactive=True, inputs=NoInput())
+    write_tracks(workdir / "tracks.txt", BASIC[:3])  # дописали трек, обновили плейлист в браузере
+    client = FakeClient()
+    client.remote_playlists = [{"id": 1001, "title": "Из VK", "tracks": [{"id": 1}, {"id": 2}, {"id": 3}],
+                                "track_count": 3}]
+    code, out = run(["--yes"], client, interactive=True, inputs=NoInput())
+    assert code == 0 and client.updated == [] and "уже в актуальном состоянии" in out

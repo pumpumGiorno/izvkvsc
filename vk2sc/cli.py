@@ -658,8 +658,10 @@ class Runner:
 
     def adopt_browser_playlists(self, me: dict, chunks: list[list[int]]) -> None:
         """Плейлисты, созданные браузерным скриптом, программа ещё не знает — находим их по
-        названию и метке «vk2sc» в описании, чтобы не создать второй раз и не спрашивать зря."""
-        if len(self.state.playlists) >= len(chunks):
+        названию и метке «vk2sc» в описании, чтобы не создать второй раз и не спрашивать зря.
+        Уже известным плейлистам, которые скрипт обновил, записываем их настоящий список треков."""
+        stale = [k for k, pl in enumerate(self.state.playlists[:len(chunks)]) if pl.get("track_ids") != chunks[k]]
+        if len(self.state.playlists) >= len(chunks) and not stale:
             return
         try:
             remote = self.client.user_playlists(int(me["id"]))
@@ -668,6 +670,11 @@ class Runner:
         except SoundCloudError as e:
             log.warning("Не удалось получить плейлисты аккаунта: %s", e)
             return
+        by_id = {p.get("id"): p for p in remote}
+        for k in stale:
+            pl = self.state.playlists[k]
+            if pl.get("id") in by_id and _remote_track_ids(by_id[pl["id"]]) == chunks[k]:
+                pl["track_ids"] = chunks[k]  # обновлён в браузере — менять нечего
         known = {pl.get("id") for pl in self.state.playlists}
         titles = self.playlist_titles(len(chunks))
         for k in range(len(self.state.playlists), len(chunks)):
@@ -676,7 +683,7 @@ class Runner:
             if not found:
                 break  # плейлисты идут по порядку: «Из VK», «Из VK (2)»…
             p = max(found, key=lambda x: _parse_time(x.get("created_at")) or 0)
-            remote_ids = [int(t["id"]) for t in p.get("tracks") or [] if isinstance(t, dict) and "id" in t]
+            remote_ids = _remote_track_ids(p)
             # Скрипт ставит ровно нужный список; если SoundCloud отдал его не полностью или
             # отбросил недоступные треки, не гоняем обновление по кругу.
             track_ids = chunks[k] if set(remote_ids) <= set(chunks[k]) else remote_ids
@@ -736,10 +743,17 @@ class Runner:
             self.out(f"Если в аккаунте есть лишний пустой плейлист «{p['title']}», удалите его вручную.")
         if found:
             self.out(f"Нашёл плейлист «{found['title']}», созданный в прошлый раз, — продолжу в него.")
+            # Треки, которые в нём уже есть (например, его заполнил браузерный скрипт):
+            # иначе программа будет снова и снова «обновлять» его на тот же список.
             self.state.playlists.append({"id": int(found["id"]), "title": found["title"],
-                                         "url": found.get("permalink_url"), "track_ids": []})
+                                         "url": found.get("permalink_url"), "track_ids": _remote_track_ids(found)})
         self.state.pending_create = None
         self.state.save()
+
+
+def _remote_track_ids(playlist: dict) -> list[int]:
+    """id треков плейлиста из ответа API (там есть все треки, у большинства — только id)."""
+    return [int(t["id"]) for t in playlist.get("tracks") or [] if isinstance(t, dict) and "id" in t]
 
 
 def _parse_time(value: Optional[str]) -> Optional[float]:
