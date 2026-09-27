@@ -2,7 +2,8 @@
 
 Строка приводится к «сравнимому» виду: нижний регистр, ё→е, без диакритики
 в латинице, без пунктуации и лишних пробелов. Отдельно разбираются пометки
-в скобках: шум («Official Audio», «Lyrics», «Remastered») выбрасывается,
+в скобках: шум («Official Audio», «Lyrics», «Remastered») и технические
+хвосты VK («VK.COM», «Reupload», «uploaded by …») выбрасываются,
 версии («Remix», «Live», «Acoustic») сохраняются как теги, а «feat./ft.»
 уходит в список приглашённых исполнителей.
 """
@@ -58,8 +59,24 @@ _NOISE_RE = re.compile(
     r"|prod(?:uced)?\.?(?:\s+by)?\s+.+|free\s+(?:download|dl)|out\s+now|bonus(?:\s+track)?|mono|stereo"
     r"|(?:из|from|ost|саундтрек|soundtrack)\b.*"
     r"|\d{4}|ncs\s+release|copyright\s+free|no\s+copyright"
+    r"|topic|audio\s+only|official\s+lyrics?(?:\s+video)?"
     r")$"
 )
+
+# Технические хвосты из VK и перезаливов: «(VK.COM)», «[vk.com reupload]», «(uploaded by user123)».
+# Слово считается мусором, только если во фрагменте нет ничего, кроме таких слов:
+# «(Remix)», «(Live)», «(R.I.P.)» и т. п. остаются нетронутыми.
+_JUNK_WORDS = frozenset({
+    "vk", "вк", "vkontakte", "вконтакте", "reupload", "reuploads", "reuploaded", "reup",
+    "upload", "uploads", "uploaded", "rip", "ripped", "source", "перезалив",
+})
+_JUNK_FILLER = frozenset({"re", "by", "from", "via", "com", "ru", "www", "http", "https"})
+_VK_DOMAIN_RE = re.compile(r"(?:https?\s*:\s*/+\s*)?(?:www\s*\.\s*)?(?:vk|vkontakte)\s*\.\s*(?:com|ru|me)\b(?:/\S*)?")
+_UPLOADED_BY_RE = re.compile(r"^(?:re[\s-]?)?upload(?:ed|s)?\s+by\b")
+_SOURCE_RE = re.compile(r"^source\s*:")
+_TRAILING_GROUP_RE = re.compile(r"\s*[(\[{【]([^()\[\]{}【】]*)[)\]}】]\s*$")
+_TRAILING_SEGMENT_RE = re.compile(r"\s+(?:-|–|—|\||//)\s+([^-–—|/()\[\]]+?)\s*$")
+_TRAILING_DOMAIN_RE = re.compile(r"\s+(?:www\.)?(?:vk|vkontakte)\.(?:com|ru)\s*$", re.IGNORECASE)
 
 # Теги версий. «Сильные» ищем везде, «слабые» только в скобках или после « - »,
 # чтобы не путать «Live Your Life» с концертной записью.
@@ -130,6 +147,29 @@ def translit(text: str) -> str:
     return text.translate(_TRANSLIT)
 
 
+# Разные системы латиницы для одного и того же русского имени: «Yolka»/«Elka»,
+# «Maksim»/«Maxim», «Mumiy»/«Mumij», «Khleb»/«Hleb». Сводим к общему «скелету».
+_SKELETON_RULES = (
+    (re.compile(r"shch"), "sch"),
+    (re.compile(r"kh"), "h"),
+    (re.compile(r"x"), "ks"),
+    (re.compile(r"(?:y|j|i)(?=[aou])|j(?=e)"), "y"),
+    (re.compile(r"(?:ye|yo)"), "e"),
+    (re.compile(r"(?:iy|ij|ii|yj)\b"), "i"),
+    (re.compile(r"(?<=[a-z])y\b"), "i"),
+    (re.compile(r"j"), "y"),
+    (re.compile(r"w"), "v"),
+)
+
+
+def translit_skeleton(text: str) -> str:
+    """Грубая латинская форма для сравнения транслитераций: «елка» и «Yolka» → «elka»."""
+    text = translit(text)
+    for rx, repl in _SKELETON_RULES:
+        text = rx.sub(repl, text)
+    return text
+
+
 def strip_username_suffix(name: str) -> str:
     """«imaginedragonsofficial» → «imaginedragons», «Muse Music» → «muse»."""
     name = compact(name)
@@ -149,8 +189,41 @@ def split_artists(text: str) -> list[str]:
     return [s for s in (simplify(p) for p in parts) if s]
 
 
+def is_vk_junk(fragment: str) -> bool:
+    """Фрагмент целиком — технический мусор: «VK.COM», «vk.com reupload», «uploaded by user123»."""
+    text = _VK_DOMAIN_RE.sub(" vk ", fold(fragment)).strip()
+    if _UPLOADED_BY_RE.match(text) or _SOURCE_RE.match(text):
+        return True
+    words = re.findall(r"[^\W_]+", text)
+    return (
+        any(w in _JUNK_WORDS for w in words)
+        and all(w in _JUNK_WORDS or w in _JUNK_FILLER for w in words)
+    )
+
+
+def strip_vk_junk(title: str) -> str:
+    """Убирает технические хвосты в конце названия: «Song (VK.COM) [Reupload]» → «Song».
+
+    Трогает только скобки и части после « - » в самом конце и только если там
+    нет ничего, кроме мусора. Если после чистки ничего не остаётся, возвращает исходник.
+    """
+    text = re.sub(r"\s+", " ", title).strip()
+    while True:
+        for rx in (_TRAILING_GROUP_RE, _TRAILING_SEGMENT_RE):
+            m = rx.search(text)
+            if m and is_vk_junk(m.group(1)) and text[: m.start()].strip(" -–—|/"):
+                text = text[: m.start()].rstrip(" -–—|/")
+                break
+        else:
+            m = _TRAILING_DOMAIN_RE.search(text)
+            if m and text[: m.start()].strip():
+                text = text[: m.start()].rstrip(" -–—|/")
+                continue
+            return text or title.strip()
+
+
 def is_noise(fragment: str) -> bool:
-    return bool(_NOISE_RE.match(simplify_keep_dots(fragment)))
+    return bool(_NOISE_RE.match(simplify_keep_dots(fragment))) or is_vk_junk(fragment)
 
 
 def simplify_keep_dots(text: str) -> str:
@@ -308,11 +381,16 @@ def clean_title_for_query(title: str) -> str:
             return " "
         return f" {inner} "
 
-    text = _BRACKETS_RE.sub(repl, unicodedata.normalize("NFKC", title))
+    text = _BRACKETS_RE.sub(repl, strip_vk_junk(unicodedata.normalize("NFKC", title)))
     m = _FEAT_RE.search(text.lower())
     if m:
         text = text[: m.start()]
     return re.sub(r"\s+", " ", text).strip(" -|")
+
+
+def search_title(title: str) -> str:
+    """Название для поиска и отчёта: без хвостов VK, шума и feat. Никогда не пустое."""
+    return clean_title_for_query(title) or strip_vk_junk(title)
 
 
 def clean_artist_for_query(artist: str) -> str:

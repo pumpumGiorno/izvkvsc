@@ -1,3 +1,5 @@
+import pytest
+
 from vk2sc.matching import AUTO_THRESHOLD, Candidate, decide, rank, score_candidate
 from vk2sc.tracks import Track
 
@@ -235,3 +237,152 @@ def test_control_characters_stripped_from_api_fields():
     c = Candidate.from_api({"id": 1, "title": "Song\x1b[2J\x07", "user": {"username": "U\x1b]0;x\x07"},
                             "permalink_url": "https://soundcloud.com/u/s"})
     assert "\x1b" not in c.title and "\x07" not in c.title and "\x1b" not in c.username
+
+
+# ---- Автоматический выбор (auto_pick) ----
+
+from vk2sc.matching import auto_pick  # noqa: E402
+
+
+def pick(track, candidates):
+    return auto_pick(track, rank(track, candidates))
+
+
+def test_auto_pick_chooses_most_similar_of_several():
+    track = Track("Imagine Dragons", "Believer", 204)
+    decision = pick(track, [
+        cand(1, "Believer (Kaskade Remix)", "Imagine Dragons", 250),
+        cand(2, "Believer - Перевод на русском", "danon_", 211),
+        cand(3, "Believer", "Imagine Dragons", 204),
+        cand(4, "Thunder", "Imagine Dragons", 187),
+    ])
+    assert decision.kind == "auto" and decision.best.candidate.id == 3
+
+
+def test_second_candidate_wins_when_first_is_worse():
+    track = Track("Кино", "Звезда по имени Солнце", 225)
+    decision = pick(track, [
+        cand(1, "Звезда по имени Солнце (cover)", "school band", 230),  # SoundCloud поставил первым
+        cand(2, "Звезда по имени Солнце", "Кино", 226),
+    ])
+    assert decision.kind == "auto" and decision.best.candidate.id == 2
+
+
+def test_wrong_duration_is_penalized_and_not_auto():
+    track = Track("Imagine Dragons", "Believer", 204)
+    right = score_candidate(track, cand(1, "Believer", "Imagine Dragons", 206))
+    wrong = score_candidate(track, cand(2, "Believer", "Imagine Dragons", 290))
+    assert right.score - wrong.score >= 30
+    decision = pick(track, [cand(2, "Believer", "Imagine Dragons", 290)])
+    assert decision.kind == "low"  # похожее название без подходящей длительности — пропуск
+
+
+def test_duration_bands():
+    track = Track("Imagine Dragons", "Believer", 200)
+    scores = {d: score_candidate(track, cand(1, "Believer", "Imagine Dragons (fan)", 200 + d)).score
+              for d in (3, 8, 15, 30, 90)}
+    assert scores[3] >= scores[8] >= scores[15] > scores[30] > scores[90]
+    assert pick(track, [cand(1, "Believer", "Imagine Dragons", 215)]).kind == "auto"  # 15 с — ещё можно
+    assert pick(track, [cand(1, "Believer", "Imagine Dragons", 225)]).kind == "low"  # 25 с — уже нет
+
+
+def test_normal_version_beats_slowed_reverb():
+    track = Track("Miyagi & Andy Panda", "Kosandra", 216)
+    decision = pick(track, [
+        cand(1, "Kosandra (slowed + reverb)", "Miyagi & Andy Panda", 216, plays=10**6),
+        cand(2, "Kosandra", "Miyagi & Andy Panda", 217, plays=10),
+    ])
+    assert decision.kind == "auto" and decision.best.candidate.id == 2
+    alone = pick(track, [cand(1, "Kosandra (slowed + reverb)", "Miyagi & Andy Panda", 216)])
+    assert alone.kind != "auto"  # другую версию не подставляем даже без альтернатив
+
+
+def test_slowed_in_vk_beats_normal_version():
+    track = Track("Miyagi & Andy Panda", "Kosandra (Slowed)", 250)
+    decision = pick(track, [
+        cand(1, "Kosandra", "Miyagi & Andy Panda", 216, plays=10**6),
+        cand(2, "Miyagi & Andy Panda - Kosandra (slowed + reverb)", "slowed fan", 251),
+    ])
+    assert decision.kind == "auto" and decision.best.candidate.id == 2
+    assert pick(track, [cand(1, "Kosandra", "Miyagi & Andy Panda", 250)]).kind != "auto"
+
+
+@pytest.mark.parametrize("version", ["Remix", "Live", "Acoustic", "Instrumental", "Sped Up", "Nightcore", "Cover"])
+def test_other_versions_are_not_auto_picked_for_original(version):
+    track = Track("Imagine Dragons", "Believer")
+    decision = pick(track, [cand(1, f"Believer ({version})", "Imagine Dragons")])
+    assert decision.kind != "auto", version
+
+
+def test_nothing_similar_is_skipped():
+    track = Track("Кино", "Группа крови", 285)
+    decision = pick(track, [cand(1, "Summer Vibes Mix 2019", "dj someone", 3600),
+                            cand(2, "Группа крови", "Кинотеатр Мелодия", 285)])
+    assert decision.kind in ("none", "low")
+
+
+def test_same_title_other_artist_is_not_auto():
+    track = Track("Imagine Dragons", "Believer", 204)
+    assert pick(track, [cand(1, "Believer", "Kaskade", 204)]).kind != "auto"
+
+
+def test_close_candidates_tie_break_by_duration_then_popularity():
+    track = Track("Кино", "Группа крови", 285)
+    decision = pick(track, [
+        cand(1, "Группа крови", "Кино", 280, plays=10**6),
+        cand(2, "Группа крови", "Кино", 284, plays=10),
+    ])
+    assert decision.best.candidate.id == 2  # ближе по длительности
+    no_duration = Track("Кино", "Группа крови")
+    decision = pick(no_duration, [
+        cand(1, "Группа крови", "Кино", 284, plays=10),
+        cand(2, "Группа крови", "Кино", 247, plays=5000),
+    ])
+    assert decision.kind == "auto" and decision.best.candidate.id == 2  # популярнее
+
+
+def test_auto_pick_is_deterministic():
+    track = Track("Кино", "Группа крови")
+    cands = [cand(i, "Группа крови", "Кино", 240 + i, plays=100) for i in range(1, 6)]
+    picks = {pick(track, order).best.candidate.id for order in (cands, cands[::-1], cands[2:] + cands[:2])}
+    assert len(picks) == 1
+
+
+def stub(id, score, duration=None, diff=None, version_penalty=0.0, title="song", title_sim=100.0, artist_sim=100.0):
+    from vk2sc.normalize import parse_title
+    from vk2sc.matching import Scored
+    return Scored(candidate=cand(id, title, "Artist", duration), score=score, uploader_match=True,
+                  title=parse_title(title), duration_diff=diff, artist_sim=artist_sim,
+                  title_sim=title_sim, version_penalty=version_penalty)
+
+
+def test_medium_confidence_needs_clear_lead():
+    track = Track("Artist", "Song")
+    assert auto_pick(track, [stub(1, 78)]).kind == "auto"  # явный лидер, других записей нет
+    assert auto_pick(track, [stub(1, 78, 200), stub(2, 74, 260, title="song b")]).kind == "low"  # соперник рядом
+    assert auto_pick(track, [stub(1, 78, 200), stub(2, 60, 260, title="song b")]).kind == "auto"
+    # Перезаливка той же записи — не соперник.
+    assert auto_pick(track, [stub(1, 78, 200), stub(2, 77, 201)]).kind == "auto"
+    assert auto_pick(track, [stub(1, 78, version_penalty=20)]).kind == "low"  # признак другой версии
+    assert auto_pick(track, [stub(1, 78, diff=15)]).kind == "low"  # длительность в средней зоне строже
+    assert auto_pick(track, [stub(1, 78, title_sim=80)]).kind == "low"
+    assert auto_pick(track, [stub(1, 60)]).kind == "low"
+    assert auto_pick(track, [stub(1, 20)]).kind == "none"
+
+
+def test_threshold_moves_medium_zone():
+    track = Track("Artist", "Song")
+    assert auto_pick(track, [stub(1, 78)], auto_threshold=95).kind == "low"
+    assert auto_pick(track, [stub(1, 90)], auto_threshold=95).kind == "auto"
+
+
+def test_numeric_title_matches_only_same_number():
+    track = Track("Some Band", "320")
+    assert score_candidate(track, cand(1, "320", "Some Band")).score >= 95
+    assert score_candidate(track, cand(2, "Another Song", "Some Band")).score < 70
+    assert pick(track, [cand(2, "Another Song", "Some Band"), cand(3, "320 Degrees", "Some Band")]).kind != "auto"
+
+
+def test_vk_junk_in_title_does_not_hurt_score():
+    track = Track("Imagine Dragons", "Believer (VK.COM) [Reupload]", 204)
+    assert score_candidate(track, cand(1, "Believer", "Imagine Dragons", 204)).score >= 95

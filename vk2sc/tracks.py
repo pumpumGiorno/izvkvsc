@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
 
@@ -27,14 +27,22 @@ BITRATE_TITLE_RE = re.compile(r"^~?\s?\d{2,3}(\s*(?:kbps|kbit/s|kb/s|кбит/с
 _STANDARD_BITRATES = {32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320}
 
 
-def is_bitrate_title(title: str) -> bool:
+def bitrate_title_kind(title: str) -> Optional[str]:
+    """«explicit» — точно битрейт («~128», «256 kbps»); «plain» — голое стандартное
+    число («320»): это может быть и настоящая песня; None — обычное название."""
     text = title.strip()
     m = BITRATE_TITLE_RE.match(text)
     if not m:
-        return False
+        return None
     if text.startswith("~") or m.group(1):
-        return True
-    return int(text) in _STANDARD_BITRATES
+        return "explicit"
+    return "plain" if int(text) in _STANDARD_BITRATES else None
+
+
+def is_bitrate_title(title: str, context: bool = True) -> bool:
+    """context=True — в списке есть и другие признаки бага экспорта, голое «320» тоже битрейт."""
+    kind = bitrate_title_kind(title)
+    return kind == "explicit" or (kind == "plain" and context)
 
 
 class TracksFileError(Exception):
@@ -47,6 +55,8 @@ class Track:
     title: str
     duration: Optional[int] = None  # сек
     line_no: int = 0
+    # В файле есть другие битрейты вместо названий: тогда и голое «320» считаем битрейтом.
+    bitrate_context: bool = field(default=False, compare=False)
 
     @property
     def display(self) -> str:
@@ -55,8 +65,12 @@ class Track:
 
     @property
     def broken_title(self) -> bool:
-        """Вместо названия битрейт — искать такой трек бессмысленно."""
-        return is_bitrate_title(self.title)
+        """Вместо названия битрейт — искать такой трек бессмысленно.
+
+        «~128» и «256 kbps» — всегда битрейт. Голое «320» — только если в том же
+        списке есть и другие такие названия (баг экспорта); одиночное «Artist — 320»
+        ищется как обычная песня, но совпасть может только с треком «320»."""
+        return is_bitrate_title(self.title, self.bitrate_context)
 
     def base_key(self) -> str:
         """Ключ для state.json. Не зависит от номера строки: файл можно дополнять."""
@@ -128,7 +142,14 @@ def read_tracks(path: Path) -> tuple[list[Track], list[str]]:
             tracks.append(track)
     if not tracks:
         raise TracksFileError(f"В {path} нет ни одного трека в формате «Исполнитель — Название».")
-    return tracks, warnings
+    return apply_bitrate_context(tracks), warnings
+
+
+def apply_bitrate_context(tracks: list[Track]) -> list[Track]:
+    """Голые «320»/«128» считаем битрейтом, если в списке есть «~128»/«kbps» или таких чисел несколько."""
+    kinds = [bitrate_title_kind(t.title) for t in tracks]
+    context = "explicit" in kinds or kinds.count("plain") >= 2
+    return [replace(t, bitrate_context=context) for t in tracks]
 
 
 def track_keys(tracks: list[Track]) -> list[str]:

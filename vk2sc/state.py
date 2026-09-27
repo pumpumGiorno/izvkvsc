@@ -2,6 +2,9 @@
 
 Пишется атомарно (временный файл + os.replace), поэтому Ctrl+C или падение
 в момент сохранения не портят прошлую версию.
+
+У каждой записи трека есть поле «algo» — версия алгоритма сопоставления
+(matching.MATCHING_VERSION). У записей старых версий его нет, это версия 1.
 """
 
 from __future__ import annotations
@@ -20,11 +23,14 @@ AUTO = "auto"  # уверенное совпадение
 MANUAL = "manual"  # выбран вручную
 SKIPPED = "skipped"  # пропущен пользователем
 NOT_FOUND = "not_found"  # ничего похожего
-PENDING = "pending"  # нужен ручной выбор, но спросить было нельзя (--no-input)
+LOW = "low_confidence"  # что-то похожее нашлось, но автоматически брать рискованно
+PENDING = "pending"  # старые версии: ждал ручного выбора (--no-input); теперь решается автоматически
 BROKEN = "broken_title"  # вместо названия битрейт («320», «~128») — не ищется
 
 MATCHED = (AUTO, MANUAL)
-DECIDED = (AUTO, MANUAL, SKIPPED, NOT_FOUND, BROKEN)
+DECIDED = (AUTO, MANUAL, SKIPPED, NOT_FOUND, LOW, BROKEN)
+# Решения, принятые программой, а не человеком: их можно пересчитать новой версией алгоритма.
+AUTOMATIC = (AUTO, NOT_FOUND, LOW)
 
 
 class StateError(Exception):

@@ -101,6 +101,9 @@ def write_tracks(path, lines):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+STATUS = 8  # колонка status в report.csv
+
+
 def read_report(path):
     with path.open(encoding="utf-8-sig") as f:
         return list(csv.reader(f, delimiter=";"))
@@ -127,11 +130,15 @@ def test_dry_run_report(workdir):
     code, out = run(["--dry-run"], client)
     assert code == 0
     rows = read_report(workdir / "report.csv")
-    assert rows[0] == ["Трек из VK", "Найдено в SoundCloud", "Ссылка", "Уверенность", "Статус"]
-    statuses = [r[4] for r in rows[1:]]
-    assert statuses == ["будет добавлен", "будет добавлен", "будет добавлен", "не найден"]
-    assert rows[1][1].startswith("Imagine Dragons — Believer")
-    assert int(rows[1][3]) >= 95
+    assert rows[0] == ["line", "original_artist", "original_title", "search_title", "matched_artist",
+                       "matched_title", "soundcloud_url", "score", "status", "search_variant", "note"]
+    statuses = [r[STATUS] for r in rows[1:]]
+    assert statuses == ["автоматически выбран"] * 3 + ["не найден"]
+    assert rows[1][1:4] == ["Imagine Dragons", "Believer (Official Audio)", "Believer"]
+    assert rows[1][4:6] == ["Imagine Dragons", "Believer"]
+    assert int(rows[1][7]) >= 95
+    assert rows[1][9] == "исходный"
+    assert rows[4][4:8] == ["", "", "", ""]
     assert client.created == [] and client.updated == []
     assert "Будет добавлено:" in out and "Не найдено:" in out
 
@@ -169,13 +176,14 @@ def test_real_run_asks_confirmation_and_is_idempotent(workdir, monkeypatch):
     monkeypatch.setenv("SOUNDCLOUD_OAUTH_TOKEN", "secret-token-value")
     write_tracks(workdir / "tracks.txt", BASIC[:3])
     client = FakeClient()
-    inputs = Inputs("", "y")  # название по умолчанию, подтверждение
+    inputs = Inputs("y")  # название не спрашивается, только подтверждение
     code, out = run([], client, interactive=True, inputs=inputs)
     assert code == 0
+    assert inputs.prompts == ["Продолжить? [y/N]: "]
     assert client.created == [("Из VK", [1, 2, 3], "private")]
     assert "создать приватный плейлист «Из VK» — 3 треков" in out
     rows = read_report(workdir / "report.csv")
-    assert [r[4] for r in rows[1:]] == ["добавлен", "добавлен", "добавлен"]
+    assert [r[STATUS] for r in rows[1:]] == ["добавлен", "добавлен", "добавлен"]
 
     # Повторный запуск: ничего не ищет, ничего не создаёт, дублей нет.
     again = FakeClient()
@@ -198,7 +206,8 @@ def test_declined_confirmation_creates_nothing(workdir, monkeypatch):
     code, out = run(["--title", "Мой VK"], client, interactive=True, inputs=Inputs("n"))
     assert code == 0 and client.created == []
     assert "ничего не изменилось" in out
-    assert read_report(workdir / "report.csv")[1][4] == "найден, не добавлен"
+    row = read_report(workdir / "report.csv")[1]
+    assert row[STATUS] == "автоматически выбран" and "не добавлен" in row[10]
 
 
 def test_no_input_never_creates_playlist(workdir, monkeypatch):
@@ -213,7 +222,7 @@ def test_no_input_never_creates_playlist(workdir, monkeypatch):
 def test_missing_token(workdir):
     write_tracks(workdir / "tracks.txt", BASIC[:1])
     client = FakeClient()
-    code, out = run([], client, interactive=True, inputs=Inputs("", ))
+    code, out = run([], client, interactive=True, inputs=Inputs())
     assert code == 1 and "SOUNDCLOUD_OAUTH_TOKEN" in out and client.created == []
 
 
@@ -238,9 +247,9 @@ def test_duplicates_added_once(workdir, monkeypatch):
     monkeypatch.setenv("SOUNDCLOUD_OAUTH_TOKEN", "secret-token-value")
     write_tracks(workdir / "tracks.txt", ["Imagine Dragons — Believer", "Кино — Группа крови", "Imagine Dragons — Believer"])
     client = FakeClient()
-    code, _ = run([], client, interactive=True, inputs=Inputs("", "y"))
+    code, _ = run([], client, interactive=True, inputs=Inputs("y"))
     assert code == 0 and client.created[0][1] == [1, 2]
-    statuses = [r[4] for r in read_report(workdir / "report.csv")[1:]]
+    statuses = [r[STATUS] for r in read_report(workdir / "report.csv")[1:]]
     assert statuses[2].startswith("дубликат")
 
 
@@ -255,7 +264,7 @@ def test_interactive_choice_skip_and_custom_query(workdir):
     )
     client = FakeClient()
     inputs = Inputs("2", "Imagine Dragons Believer", "1")
-    code, out = run(["--dry-run"], client, interactive=True, inputs=inputs)
+    code, out = run(["--dry-run", "--interactive"], client, interactive=True, inputs=inputs)
     assert code == 0
     state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
     entries = list(state["tracks"].values())
@@ -263,40 +272,46 @@ def test_interactive_choice_skip_and_custom_query(workdir):
     assert entries[1]["status"] == "manual" and entries[1]["match"]["id"] == 1
     assert "Imagine Dragons Believer" in entries[1]["queries"]
     assert entries[2]["status"] == "auto"
-    statuses = [r[4] for r in read_report(workdir / "report.csv")[1:]]
-    assert statuses == ["выбран вручную", "выбран вручную", "будет добавлен"]
+    statuses = [r[STATUS] for r in read_report(workdir / "report.csv")[1:]]
+    assert statuses == ["выбран вручную", "выбран вручную", "автоматически выбран"]
 
 
 def test_skip_and_link(workdir):
     write_tracks(workdir / "tracks.txt", ["Daft Punk — Get Lucky", "Неизвестный — Песня"])
     client = FakeClient()
     inputs = Inputs("", "https://soundcloud.com/imaginedragons/1")
-    run(["--dry-run"], client, interactive=True, inputs=inputs)
+    run(["--dry-run", "--interactive"], client, interactive=True, inputs=inputs)
     entries = list(json.loads((workdir / "state.json").read_text(encoding="utf-8"))["tracks"].values())
     assert entries[0]["status"] == "skipped"
     assert entries[1]["status"] == "manual" and entries[1]["match"]["id"] == 1
 
 
-def test_no_input_defers_then_asks_without_new_search(workdir):
-    write_tracks(workdir / "tracks.txt", ["Daft Punk — Get Lucky"])
-    first = FakeClient()
-    run(["--dry-run"], first, interactive=False)
-    state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
-    assert list(state["tracks"].values())[0]["status"] == "pending"
-    assert read_report(workdir / "report.csv")[1][4] == "ждёт ручного выбора"
-
-    second = FakeClient()
-    run(["--dry-run"], second, interactive=True, inputs=Inputs("1"))
-    assert second.searches == []
-    state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
-    assert list(state["tracks"].values())[0]["status"] == "manual"
+def test_legacy_pending_entry_is_resolved_automatically_from_cache(workdir):
+    """state.json старой версии: трек ждал ручного выбора (--no-input). Теперь он решается сам, без поиска."""
+    write_tracks(workdir / "tracks.txt", ["Daft Punk — Get Lucky | 6:09"])
+    legacy = {"version": 1, "playlists": [], "pending_create": None, "tracks": {
+        "daft punk — get lucky #1": {
+            "source": "Daft Punk — Get Lucky", "status": "pending", "match": None,
+            "queries": ["Daft Punk Get Lucky"],
+            "candidates": [dict(CATALOG[4], url=CATALOG[4]["permalink_url"], username="Daft Punk", duration=248),
+                           dict(CATALOG[3], url=CATALOG[3]["permalink_url"], username="Daft Punk", duration=369)],
+        }}}
+    for c in legacy["tracks"]["daft punk — get lucky #1"]["candidates"]:
+        for k in ("kind", "user", "permalink_url", "full_duration"):
+            c.pop(k)
+    (workdir / "state.json").write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+    client = FakeClient()
+    code, _ = run(["--dry-run"], client, interactive=True, inputs=Inputs())
+    assert code == 0 and client.searches == []
+    entry = list(json.loads((workdir / "state.json").read_text(encoding="utf-8"))["tracks"].values())[0]
+    assert entry["status"] == "auto" and entry["match"]["id"] == 4 and entry["algo"] >= 2
 
 
 def test_review_reasks_skipped(workdir):
     write_tracks(workdir / "tracks.txt", ["Daft Punk — Get Lucky"])
-    run(["--dry-run"], FakeClient(), interactive=True, inputs=Inputs(""))
+    run(["--dry-run", "--interactive"], FakeClient(), interactive=True, inputs=Inputs(""))
     client = FakeClient()
-    run(["--dry-run", "--review"], client, interactive=True, inputs=Inputs("1"))
+    run(["--dry-run", "--interactive", "--review"], client, interactive=True, inputs=Inputs("1"))
     assert client.searches == []
     state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
     assert list(state["tracks"].values())[0]["status"] == "manual"
@@ -343,11 +358,11 @@ def test_fallback_query_used_when_auto_match_is_only_a_reupload(workdir):
 
 def test_dry_run_does_not_fix_title_so_real_run_asks(workdir, monkeypatch):
     write_tracks(workdir / "tracks.txt", BASIC[:1])
-    run(["--dry-run"], FakeClient())
+    run(["--dry-run", "--interactive"], FakeClient(), interactive=True, inputs=Inputs())
     monkeypatch.setenv("SOUNDCLOUD_OAUTH_TOKEN", "secret-token-value")
     client = FakeClient()
     inputs = Inputs("Мой перенос", "y")
-    run([], client, interactive=True, inputs=inputs)
+    run(["--interactive"], client, interactive=True, inputs=inputs)
     assert inputs.prompts[0].startswith("Название нового плейлиста")
     assert client.created[0][0] == "Мой перенос"
 
@@ -362,7 +377,7 @@ def test_numeric_query_and_out_of_range_number_search(workdir):
             return self.catalog if query in ("1979", "/1979") else []
 
     client = Picky(catalog=client.catalog)
-    run(["--dry-run"], client, interactive=True, inputs=Inputs("/1979", "1"))
+    run(["--dry-run", "--interactive"], client, interactive=True, inputs=Inputs("/1979", "1"))
     assert client.searches[-1] == "1979"
     state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
     assert list(state["tracks"].values())[0]["match"]["id"] == 9
@@ -408,8 +423,8 @@ def test_report_cells_cannot_become_excel_formulas(workdir):
 
     run(["--dry-run"], Exact())
     row = read_report(workdir / "report.csv")[1]
-    assert row[0].startswith("'=cmd")
-    assert row[1].startswith("'@SUM")
+    assert row[1].startswith("'=cmd")
+    assert row[4].startswith("'@SUM")
 
 
 BROKEN_LIST = [
@@ -433,21 +448,20 @@ def test_broken_titles_are_not_searched_and_reported(workdir):
     assert "битым названием" in out and "строки 1, 2, 3" in out
     assert "Битые названия:        3" in out
     rows = read_report(workdir / "report.csv")[1:]
-    assert [r[4] for r in rows[:3]] == ["битое название"] * 3
-    assert rows[0][1] == "" and rows[0][2] == ""  # ничего не «нашлось»
-    assert rows[3][4] == "будет добавлен"
+    assert [r[STATUS] for r in rows[:3]] == ["битое название"] * 3
+    assert rows[0][4:8] == ["", "", "", ""]  # ничего не «нашлось»
+    assert rows[3][STATUS] == "автоматически выбран"
 
 
-def test_stale_match_for_broken_title_is_overridden_and_not_added(workdir, monkeypatch):
-    """Старый state.json мог содержать «совпадение» для «320» — оно не должно попасть в плейлист."""
-    write_tracks(workdir / "tracks.txt", BROKEN_LIST[:1] + BROKEN_LIST[3:4])
+def stale_state(workdir, key, source):
+    """Старый state.json, где для «320» по ошибке «нашёлся» чужой трек исполнителя."""
     stale = {
         "version": 1,
         "playlists": [],
         "pending_create": None,
         "tracks": {
-            "@факшиза — 320 #1": {
-                "source": "@ФакШиза — 320", "status": "auto", "queries": ["@ФакШиза 320"],
+            key: {
+                "source": source, "status": "auto", "queries": [source.replace(" —", "")],
                 "match": {"id": 3, "title": "Bad Romance (Skrillex Remix)", "username": "Lady Gaga",
                           "url": "u", "score": 90},
                 "candidates": [],
@@ -455,6 +469,13 @@ def test_stale_match_for_broken_title_is_overridden_and_not_added(workdir, monke
         },
     }
     (workdir / "state.json").write_text(json.dumps(stale, ensure_ascii=False), encoding="utf-8")
+
+
+def test_stale_match_for_broken_title_is_overridden_and_not_added(workdir, monkeypatch):
+    """Старый state.json мог содержать «совпадение» для «320» — оно не должно попасть в плейлист."""
+    # «~128» рядом — признак бага экспорта, поэтому и голое «320» считается битрейтом.
+    write_tracks(workdir / "tracks.txt", BROKEN_LIST[:2] + BROKEN_LIST[3:4])
+    stale_state(workdir, "@факшиза — 320 #1", "@ФакШиза — 320")
     monkeypatch.setenv("SOUNDCLOUD_OAUTH_TOKEN", "secret-token-value")
     client = FakeClient()
     code, _ = run(["--title", "Из VK"], client, interactive=True, inputs=Inputs("y"))
@@ -470,28 +491,64 @@ def test_stale_match_for_broken_title_is_overridden_and_not_added(workdir, monke
 
     # В --review можно найти такой трек вручную; Enter оставляет «битое название» без поиска.
     review = FakeClient()
-    run(["--dry-run", "--review"], review, interactive=True, inputs=Inputs(""))
+    run(["--dry-run", "--interactive", "--review"], review, interactive=True, inputs=Inputs("", ""))
     assert review.searches == []
     state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
     assert state["tracks"]["@факшиза — 320 #1"]["status"] == "broken_title"
 
 
-def test_real_song_named_like_bitrate_can_be_chosen_manually_and_is_kept(workdir):
+def test_stale_match_for_lone_number_title_is_rechecked(workdir, monkeypatch):
+    """Одиночное «Artist — 320» ищется как песня, но старое «совпадение» по исполнителю не выживает."""
+    write_tracks(workdir / "tracks.txt", BROKEN_LIST[:1] + BROKEN_LIST[3:4])
+    stale_state(workdir, "@факшиза — 320 #1", "@ФакШиза — 320")
+    monkeypatch.setenv("SOUNDCLOUD_OAUTH_TOKEN", "secret-token-value")
+    kokain = sc_track(40, "Кокаин", "@ФакШиза", 73)
+
+    class ByArtist(FakeClient):
+        def search_tracks(self, query, limit=20):
+            if "ФакШиза" in query:
+                self.searches.append(query)
+                return [kokain]
+            return super().search_tracks(query, limit)
+
+    client = ByArtist()
+    code, _ = run(["--title", "Из VK", "--yes"], client, interactive=False)
+    assert code == 0
+    assert client.created == [("Из VK", [1], "private")]  # «Кокаин» вместо «320» не добавлен
+    entry = json.loads((workdir / "state.json").read_text(encoding="utf-8"))["tracks"]["@факшиза — 320 #1"]
+    assert entry["status"] in ("not_found", "low_confidence") and entry["match"] is None
+
+
+def test_lone_number_title_matches_only_the_same_number(workdir):
     write_tracks(workdir / "tracks.txt", ["Some Band — 128"])
-    run(["--dry-run"], FakeClient())
-    client = FakeClient(catalog=[sc_track(7, "128", "Some Band", 200)])
+    catalog = [sc_track(6, "Another Song", "Some Band", 200), sc_track(7, "128", "Some Band", 201)]
 
     class ByQuery(FakeClient):
         def search_tracks(self, query, limit=20):
             self.searches.append(query)
             return self.catalog
 
-    review = ByQuery(catalog=client.catalog)
-    run(["--dry-run", "--review"], review, interactive=True, inputs=Inputs("Some Band 128", "1"))
-    assert review.searches == ["Some Band 128"]  # только запрос, введённый вручную
+    client = ByQuery(catalog=catalog)
+    run(["--dry-run"], client)
     state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
-    assert state["tracks"]["some band — 128 #1"]["status"] == "manual"
+    assert state["tracks"]["some band — 128 #1"]["status"] == "auto"
+    assert state["tracks"]["some band — 128 #1"]["match"]["id"] == 7
 
+    (workdir / "state.json").unlink()
+    only_other = ByQuery(catalog=catalog[:1])
+    run(["--dry-run"], only_other)
+    state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
+    assert state["tracks"]["some band — 128 #1"]["match"] is None
+    assert all(q.strip() != "128" for q in only_other.searches)  # по одному числу не ищем
+
+
+def test_manual_choice_for_number_title_is_kept_even_in_bitrate_context(workdir):
+    write_tracks(workdir / "tracks.txt", ["Some Band — 128", "Other — ~320"])
+    manual = {"version": 1, "playlists": [], "pending_create": None, "tracks": {
+        "some band — 128 #1": {"source": "Some Band — 128", "status": "manual", "queries": ["Some Band 128"],
+                               "match": {"id": 7, "title": "128", "username": "Some Band", "url": "u", "score": 100},
+                               "candidates": []}}}
+    (workdir / "state.json").write_text(json.dumps(manual, ensure_ascii=False), encoding="utf-8")
     later = FakeClient()
     run(["--dry-run"], later)
     state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
@@ -510,3 +567,264 @@ def test_start_banner_counts_broken_titles_separately(workdir):
     write_tracks(workdir / "tracks.txt", BROKEN_LIST)
     _, out = run(["--dry-run"], FakeClient())
     assert "Искать впервые: 2." in out and "Ждут выбора" not in out
+
+
+# ---- Полностью автоматический режим ----
+
+
+class NoInput:
+    """input(), который нельзя вызывать."""
+
+    def __init__(self):
+        self.prompts = []
+
+    def __call__(self, prompt):
+        self.prompts.append(prompt)
+        raise AssertionError(f"input() вызван: {prompt}")
+
+
+def test_search_variants_strip_vk_junk():
+    from vk2sc.cli import search_variants
+    from vk2sc.tracks import Track
+
+    def queries(title):
+        return dict((label, q) for label, q in search_variants(Track("Artist", title)))
+
+    q = queries("Song (VK.COM)")
+    assert q["исходный"] == "Artist Song (VK.COM)" and q["очищенный"] == "Artist Song"
+    assert queries("Song [Reupload]")["очищенный"] == "Artist Song"
+    assert queries("Song (VK.COM) [Reupload]")["очищенный"] == "Artist Song"
+    assert "Remix" in queries("Song (Remix)")["исходный"]
+    assert list(queries("Song (Remix)").values())[0] == "Artist Song (Remix)"
+    assert all("Remix" in v for v in queries("Song (Remix)").values())  # версию из запроса не выбрасываем
+    assert all("Live" in v for v in queries("Song (Live)").values())
+
+
+def test_search_variants_order_limit_and_no_artist_only_query():
+    from vk2sc.cli import MAX_QUERIES, search_variants
+    from vk2sc.tracks import Track
+
+    variants = search_variants(Track("Кино & Юрий Шевчук feat. Гость", "Группа крови (VK.COM)"))
+    labels = [label for label, _ in variants]
+    assert len(variants) <= MAX_QUERIES
+    assert labels[:3] == ["исходный", "очищенный", "транслит"]
+    assert "только название" in labels
+    assert dict(variants)["основной исполнитель"] == "кино Группа крови"
+    assert all(q.strip().lower() not in ("кино", "кино & юрий шевчук") for _, q in variants)
+    # Простой трек без мусора: исходный и очищенный запрос совпадают — один запрос, не два.
+    simple = search_variants(Track("Imagine Dragons", "Believer"))
+    assert [label for label, _ in simple] == ["исходный", "название + исполнитель", "только название"]
+    # Название-число не ищется само по себе.
+    assert all(q != "505" for _, q in search_variants(Track("Arctic Monkeys", "505")))
+
+
+def test_cascade_retries_with_clean_query_and_logs(workdir):
+    write_tracks(workdir / "tracks.txt", ["JDFLAG — Track Name (VK.COM) | 3:00"])
+    good = sc_track(11, "Track Name", "JDFLAG", 181)
+    junk = sc_track(12, "JDFLAG - Track Name [Phonk Edition]", "someone", 176)
+
+    class Picky(FakeClient):
+        def search_tracks(self, query, limit=20):
+            self.searches.append(query)
+            return [junk] if "VK.COM" in query else [good, junk]
+
+    client = Picky()
+    code, out = run(["--dry-run"], client, interactive=True, inputs=NoInput())
+    assert code == 0
+    assert client.searches == ["JDFLAG Track Name (VK.COM)", "JDFLAG Track Name"]
+    assert "  поиск: JDFLAG Track Name (VK.COM)" in out
+    assert "результат недостаточно хороший" in out
+    assert "повторный поиск (очищенный): JDFLAG Track Name" in out
+    assert "найдено: JDFLAG — Track Name" in out and "→ автоматически выбран" in out
+    row = read_report(workdir / "report.csv")[1]
+    assert row[1:4] == ["JDFLAG", "Track Name (VK.COM)", "Track Name"]
+    assert row[4:7] == ["JDFLAG", "Track Name", good["permalink_url"]]
+    assert row[STATUS] == "автоматически выбран" and row[9] == "очищенный"
+
+
+def test_cascade_is_limited_and_unknown_track_is_skipped(workdir):
+    write_tracks(workdir / "tracks.txt", ["Неизвестный & Другой — Несуществующая песня (VK.COM)"])
+    client = FakeClient()
+    code, out = run(["--dry-run"], client, interactive=True, inputs=NoInput())
+    assert code == 0
+    from vk2sc.cli import MAX_QUERIES
+    assert 3 <= len(client.searches) <= MAX_QUERIES
+    assert len(set(client.searches)) == len(client.searches)
+    assert read_report(workdir / "report.csv")[1][STATUS] == "не найден"
+
+
+def test_first_result_is_not_taken_blindly(workdir):
+    write_tracks(workdir / "tracks.txt", ["Imagine Dragons — Believer | 3:24"])
+    results = [
+        sc_track(21, "Believer (Slowed + Reverb)", "Imagine Dragons", 260),
+        sc_track(22, "Believer - Перевод на русском", "danon_", 211),
+        sc_track(23, "Believer", "Imagine Dragons", 204),
+    ]
+
+    class Ordered(FakeClient):
+        def search_tracks(self, query, limit=20):
+            self.searches.append(query)
+            return results
+
+    client = Ordered()
+    run(["--dry-run"], client, interactive=True, inputs=NoInput())
+    entry = list(json.loads((workdir / "state.json").read_text(encoding="utf-8"))["tracks"].values())[0]
+    assert entry["status"] == "auto" and entry["match"]["id"] == 23
+    assert client.searches == ["Imagine Dragons Believer"]  # хорошее совпадение — больше не ищем
+
+
+def test_doubtful_match_is_skipped_as_low_confidence(workdir):
+    write_tracks(workdir / "tracks.txt", ["Imagine Dragons — Believer | 3:24"])
+
+    class OnlySlowed(FakeClient):
+        def search_tracks(self, query, limit=20):
+            self.searches.append(query)
+            return [sc_track(31, "Believer (slowed + reverb)", "Imagine Dragons", 210)]
+
+    run(["--dry-run"], OnlySlowed(), interactive=True, inputs=NoInput())
+    row = read_report(workdir / "report.csv")[1]
+    assert row[STATUS] == "пропущен: низкая уверенность"
+    assert row[5] == "Believer (slowed + reverb)"  # для проверки видно, что именно отвергнуто
+    entry = list(json.loads((workdir / "state.json").read_text(encoding="utf-8"))["tracks"].values())[0]
+    assert entry["status"] == "low_confidence" and entry["match"] is None
+
+
+def test_default_run_several_versions_is_automatic(workdir):
+    """Раньше «Get Lucky» без длительности спрашивал выбор — теперь решается сам."""
+    write_tracks(workdir / "tracks.txt", ["Daft Punk — Get Lucky"])
+    code, out = run(["--dry-run"], FakeClient(), interactive=True, inputs=NoInput())
+    assert code == 0 and "Нужен ваш выбор" not in out
+    entry = list(json.loads((workdir / "state.json").read_text(encoding="utf-8"))["tracks"].values())[0]
+    assert entry["status"] == "auto" and entry["match"]["id"] == 4
+
+
+def test_dry_run_never_asks(workdir, monkeypatch):
+    monkeypatch.setenv("SOUNDCLOUD_OAUTH_TOKEN", "secret-token-value")
+    write_tracks(workdir / "tracks.txt", BASIC + ["Daft Punk — Get Lucky"])
+    inputs = NoInput()
+    client = FakeClient()
+    code, out = run(["--dry-run"], client, interactive=True, inputs=inputs)
+    assert code == 0 and inputs.prompts == []
+    assert client.created == [] and client.updated == []
+    assert "плейлист не создавался" in out
+
+
+def test_yes_never_calls_input(workdir, monkeypatch):
+    monkeypatch.setenv("SOUNDCLOUD_OAUTH_TOKEN", "secret-token-value")
+    write_tracks(workdir / "tracks.txt", BASIC + ["Daft Punk — Get Lucky"])
+    inputs = NoInput()
+    client = FakeClient()
+    code, out = run(["--yes"], client, interactive=True, inputs=inputs)
+    assert code == 0 and inputs.prompts == []
+    assert client.created == [("Из VK", [1, 2, 3, 4], "private")]
+    rows = read_report(workdir / "report.csv")[1:]
+    assert [r[STATUS] for r in rows] == ["добавлен", "добавлен", "добавлен", "не найден", "добавлен"]
+
+    # Плейлист удалили на сайте: с --yes он пересоздаётся тоже без вопросов.
+    write_tracks(workdir / "tracks.txt", BASIC[:2])
+    from vk2sc.soundcloud import PlaylistNotFound
+
+    class Gone(FakeClient):
+        def set_playlist_tracks(self, playlist_id, track_ids):
+            raise PlaylistNotFound("нет")
+
+    gone = Gone()
+    code, out = run(["--yes"], gone, interactive=True, inputs=inputs)
+    assert code == 0 and inputs.prompts == [] and gone.created == [("Из VK", [1, 2], "private")]
+
+
+def test_yes_without_terminal(workdir, monkeypatch):
+    monkeypatch.setenv("SOUNDCLOUD_OAUTH_TOKEN", "secret-token-value")
+    write_tracks(workdir / "tracks.txt", BASIC[:1])
+    client = FakeClient()
+    code, _ = run(["--yes", "--no-input"], client, interactive=True, inputs=NoInput())
+    assert code == 0 and client.created == [("Из VK", [1], "private")]
+
+
+def test_interactive_requires_terminal(workdir):
+    write_tracks(workdir / "tracks.txt", BASIC[:1])
+    code, out = run(["--interactive"], FakeClient(), interactive=False)
+    assert code == 1 and "--interactive" in out
+    code, out = run(["--review"], FakeClient(), interactive=True, inputs=NoInput())
+    assert code == 1 and "--review" in out
+
+
+def test_state_resume_does_not_search_processed_tracks(workdir):
+    write_tracks(workdir / "tracks.txt", BASIC)
+    run(["--dry-run"], FakeClient(), interactive=True, inputs=NoInput())
+    state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
+    assert {e["algo"] for e in state["tracks"].values()} == {2}
+    # Все решения (найден, не найден) остаются; второй запуск не делает ни одного запроса.
+    again = FakeClient()
+    code, out = run(["--dry-run"], again, interactive=True, inputs=NoInput())
+    assert code == 0 and again.searches == []
+    assert "Решено раньше: 4" in out
+
+
+def test_old_algorithm_entries(workdir):
+    """Найденное старой версией не трогаем без --rematch; ненайденное — перепроверяем новыми запросами."""
+    write_tracks(workdir / "tracks.txt", ["Imagine Dragons — Believer (VK.COM)", "Кино — Группа крови"])
+    old = {"version": 1, "playlists": [], "pending_create": None, "tracks": {
+        "imagine dragons — believer (vk.com) #1": {
+            "source": "Imagine Dragons — Believer (VK.COM)", "status": "not_found", "match": None,
+            "queries": ["Imagine Dragons Believer (VK.COM)"], "candidates": []},
+        "кино — группа крови #1": {
+            "source": "Кино — Группа крови", "status": "auto", "queries": ["Кино Группа крови"],
+            "match": {"id": 99, "title": "Группа крови (cover)", "username": "Кино fan", "url": "u", "score": 86},
+            "candidates": [{"id": 99, "title": "Группа крови (cover)", "username": "Кино fan", "url": "u",
+                            "score": 86}]},
+    }}
+    (workdir / "state.json").write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+
+    class Exact(FakeClient):
+        def search_tracks(self, query, limit=20):
+            if "VK.COM" in query:  # по «грязному» запросу SoundCloud ничего не находит
+                self.searches.append(query)
+                return []
+            return super().search_tracks(query, limit)
+
+    client = Exact()
+    run(["--dry-run"], client, interactive=True, inputs=NoInput())
+    assert client.searches == ["Imagine Dragons Believer"]  # «грязный» запрос уже был, повторять не стали
+    state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))["tracks"]
+    assert state["imagine dragons — believer (vk.com) #1"]["status"] == "auto"
+    assert state["кино — группа крови #1"]["match"]["id"] == 99  # без --rematch не тронут
+
+    rematch = FakeClient()
+    run(["--dry-run", "--rematch"], rematch, interactive=True, inputs=NoInput())
+    state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))["tracks"]
+    assert state["кино — группа крови #1"]["match"]["id"] == 2 and state["кино — группа крови #1"]["algo"] == 2
+    # Кэш (кавер) не подошёл: добраны только запросы, которых ещё не было.
+    assert rematch.searches == ["kino gruppa krovi", "Группа крови Кино"]
+    assert all("Believer" not in q for q in rematch.searches)  # новое решение не пересчитывается
+
+
+def test_rematch_never_touches_manual_choice(workdir):
+    write_tracks(workdir / "tracks.txt", ["Кино — Группа крови"])
+    manual = {"version": 1, "playlists": [], "pending_create": None, "tracks": {
+        "кино — группа крови #1": {"source": "Кино — Группа крови", "status": "manual", "queries": [],
+                                   "match": {"id": 77, "title": "Группа крови", "username": "x", "url": "u"},
+                                   "candidates": []}}}
+    (workdir / "state.json").write_text(json.dumps(manual, ensure_ascii=False), encoding="utf-8")
+    client = FakeClient()
+    run(["--dry-run", "--rematch"], client, interactive=True, inputs=NoInput())
+    assert client.searches == []
+    state = json.loads((workdir / "state.json").read_text(encoding="utf-8"))["tracks"]
+    assert state["кино — группа крови #1"]["match"]["id"] == 77
+
+
+def test_verbose_lists_candidates(workdir):
+    write_tracks(workdir / "tracks.txt", ["Daft Punk — Get Lucky"])
+    _, quiet = run(["--dry-run"], FakeClient(), interactive=True, inputs=NoInput())
+    (workdir / "state.json").unlink()
+    _, loud = run(["--dry-run", "-v"], FakeClient(), interactive=True, inputs=NoInput())
+    assert "кандидаты:" not in quiet and "Get Lucky (Radio Edit)" not in quiet
+    assert "кандидаты:" in loud and "Get Lucky (Radio Edit)" in loud
+
+
+def test_yo_variant_is_not_deduplicated_away():
+    from vk2sc.cli import search_variants
+    from vk2sc.tracks import Track
+
+    variants = dict(search_variants(Track("Ёлка", "Прованс")))
+    assert variants["исходный"] == "Ёлка Прованс" and variants["без ё"] == "Елка Прованс"

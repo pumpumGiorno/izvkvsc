@@ -123,3 +123,86 @@ def test_query_cleanup():
     assert clean_title_for_query("Starboy (feat. Daft Punk)") == "Starboy"
     assert clean_title_for_query("Get Lucky ft. Pharrell") == "Get Lucky"
     assert clean_artist_for_query("The Weeknd feat. Daft Punk") == "The Weeknd"
+
+
+# ---- Технические хвосты VK ----
+
+from vk2sc.normalize import is_vk_junk, strip_vk_junk  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Song Name (VK.COM)",
+        "Song Name [VK.COM]",
+        "Song Name (vk.com reupload)",
+        "Song Name (Reupload)",
+        "Song Name [reuploaded]",
+        "Song Name (re-upload)",
+        "Song Name (upload)",
+        "Song Name (uploaded by user123)",
+        "Song Name (Uploaded by DJ Some One)",
+        "Song Name (VK Reuploads)",
+        "Song Name [source: vk.com]",
+        "Song Name (source)",
+        "Song Name (vk rip)",
+        "Song Name (rip)",
+        "Song Name (vkontakte)",
+        "Song Name (ВКонтакте)",
+        "Song Name (vk.com/club123)",
+        "Song Name - vk.com",
+        "Song Name vk.com",
+        "Song Name (VK.COM) [Reupload]",
+        "Song Name [Reupload] (VK.COM)",
+        "  Song   Name (VK.COM)  ",
+    ],
+)
+def test_vk_junk_is_stripped(raw):
+    assert strip_vk_junk(raw) == "Song Name"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Song Name (Remix)",
+        "Song Name (Live)",
+        "Song Name (Acoustic)",
+        "Song Name (Slowed)",
+        "Song Name (Sped Up)",
+        "Song Name (Instrumental)",
+        "Song Name (Demo)",
+        "Song Name (Radio Edit)",
+        "Song Name (Deluxe)",
+        "Song Name (Remastered)",
+        "Song Name (feat. Artist)",
+        "Song Name (Prod. Artist)",
+        "Have You Ever Been Mellow (Flamman & Abraxas Radio Mix)",
+        "Song Name (R.I.P.)",
+        "Song Name (Upload Your Mind)",
+        "Song Name (VK Remix)",
+        "Upload",  # само название не трогаем
+        "(VK.COM)",  # после чистки ничего бы не осталось — оставляем как есть
+    ],
+)
+def test_meaningful_brackets_are_kept(raw):
+    assert strip_vk_junk(raw) == raw
+
+
+def test_junk_only_at_the_end_is_stripped_and_versions_survive():
+    assert strip_vk_junk("Song (Remix) (VK.COM)") == "Song (Remix)"
+    assert strip_vk_junk("Song (Live) [vk.com reupload]") == "Song (Live)"
+
+
+def test_junk_is_noise_for_matching_and_query():
+    assert is_vk_junk("VK.COM") and is_vk_junk("uploaded by someone") and not is_vk_junk("Remix")
+    parsed = parse_title("Believer (VK.COM) [Reupload]")
+    assert parsed.core == "believer" and parsed.extra == "" and parsed.tags == frozenset()
+    assert clean_title_for_query("Believer (VK.COM)") == "Believer"
+    assert clean_title_for_query("Bad Romance (Skrillex Remix) [vk.com]") == "Bad Romance Skrillex Remix"
+
+
+@pytest.mark.parametrize("raw", ["Believer (Visualizer)", "Believer (Audio)", "Believer (Topic)", "Believer [Lyrics]",
+                                 "Believer (Official Lyric Video)"])
+def test_more_noise(raw):
+    parsed = parse_title(raw)
+    assert parsed.core == "believer" and parsed.extra == "" and parsed.tags == frozenset()

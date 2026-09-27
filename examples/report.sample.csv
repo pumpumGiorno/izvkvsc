@@ -1,16 +1,16 @@
-﻿Трек из VK;Найдено в SoundCloud;Ссылка;Уверенность;Статус
-Imagine Dragons — Believer (Official Audio) [3:24];Imagine Dragons — Believer [3:24] (только Go+);https://soundcloud.com/imaginedragons/believer;100;будет добавлен
-Кино — Группа крови;Кино — Группа крови [4:44];https://soundcloud.com/kino-scmusic/63nibgmlsvxl;100;ждёт ручного выбора
-Земфира — Хочешь?;Земфира — ХОЧЕШЬ? [3:18];https://soundcloud.com/ziemfira-music/xochesh;100;ждёт ручного выбора
-Ёлка — Прованс;اا — Ёлка - Прованс [Phonk Edition] [3:33];https://soundcloud.com/3xclusiv/yolka-provans-phonk-edition;80;ждёт ручного выбора
-Miyagi & Andy Panda — Kosandra;Miyagi & Andy Panda — Kosandra [3:41];https://soundcloud.com/miyagi_black/miyagi-andy-panda-kosandra;100;будет добавлен
-The Weeknd feat. Daft Punk — Starboy [3:50];The Weeknd — Starboy (feat. Daft Punk) [3:51];https://soundcloud.com/theweeknd/starboy-1;100;будет добавлен
-Calvin Harris ft. Rihanna — This Is What You Came For [3:42];Calvin Harris — This Is What You Came For (feat. Rihanna) [3:42] (только Go+);https://soundcloud.com/calvinharris/this-is-what-you-came-for-1;100;будет добавлен
-Lady Gaga — Bad Romance (Skrillex Remix);Lady Gaga — Bad Romance (Skrillex Remix) [4:23];https://soundcloud.com/ladygaga/bad-romance-skrillex-remix;100;будет добавлен
-Daft Punk — Get Lucky (Radio Edit) ft. Pharrell Williams [4:08];Daft Punk, Pharrell Williams, Nile Rodgers — Get Lucky (Radio Edit - feat. Pharrell Williams and Nile Rodgers) [4:08] (только Go+);https://soundcloud.com/daftpunkofficialmusic/get-lucky-radio-edit;94;будет добавлен
-Сплин — Выхода нет;Сплин — Выхода нет [3:58];https://soundcloud.com/splin-band/vykhoda-net;100;будет добавлен
-Macan — ASPHALT 8;MACAN — ASPHALT 8 [2:16];https://soundcloud.com/macan-sc/asphalt-8;100;будет добавлен
-Linkin Park — Numb [Official Music Video] [3:07];Linkin Park — Numb [3:08];https://soundcloud.com/linkinpark/numb;100;будет добавлен
-Tiësto — The Business [2:44];Tiësto — The Business [2:44];https://soundcloud.com/tiesto/the-business-1;100;будет добавлен
-Мумий Тролль — Владивосток 2000;Мумий Тролль — Владивосток 2000 [2:42];https://soundcloud.com/mumiytroll-music/vladivostok-2000-vladivostok;100;будет добавлен
-Avicii — Wake Me Up (Slowed + Reverb);Ineegees — Avicii - Wake Me Up (Slowed) [5:10];https://soundcloud.com/inee01/avicii-wake-me-up-slowed;100;ждёт ручного выбора
+﻿line;original_artist;original_title;search_title;matched_artist;matched_title;soundcloud_url;score;status;search_variant;note
+3;Imagine Dragons;Believer (Official Audio);Believer;Imagine Dragons;Believer;https://soundcloud.com/imaginedragons/believer;100;автоматически выбран;очищенный;уверенное совпадение
+4;Кино;Группа крови;Группа крови;Кино;Группа крови;https://soundcloud.com/kino-scmusic/63nibgmlsvxl;100;автоматически выбран;исходный;лучший из 6 похожих
+5;Земфира;Хочешь?;Хочешь?;Земфира;ХОЧЕШЬ?;https://soundcloud.com/ziemfira-music/xochesh;100;автоматически выбран;исходный;лучший из 3 похожих
+6;Ёлка;Прованс;Прованс;Ёлка;Прованс;https://soundcloud.com/jolka-music/provans;100;автоматически выбран;только название;уверенное совпадение
+7;Miyagi & Andy Panda;Kosandra;Kosandra;Miyagi & Andy Panda;Kosandra;https://soundcloud.com/miyagi_black/miyagi-andy-panda-kosandra;100;автоматически выбран;исходный;уверенное совпадение
+8;The Weeknd feat. Daft Punk;Starboy;Starboy;The Weeknd;Starboy (feat. Daft Punk);https://soundcloud.com/theweeknd/starboy;100;автоматически выбран;исходный;уверенное совпадение
+9;Calvin Harris ft. Rihanna;This Is What You Came For;This Is What You Came For;Calvin Harris;This Is What You Came For (feat. Rihanna);https://soundcloud.com/calvinharris/this-is-what-you-came-for-1;100;автоматически выбран;исходный;уверенное совпадение
+10;Lady Gaga;Bad Romance (Skrillex Remix);Bad Romance Skrillex Remix;Lady Gaga;Bad Romance (Skrillex Remix);https://soundcloud.com/ladygaga/bad-romance-skrillex-remix;100;автоматически выбран;исходный;уверенное совпадение
+11;Daft Punk;Get Lucky (Radio Edit) ft. Pharrell Williams;Get Lucky Radio Edit;Daft Punk, Pharrell Williams, Nile Rodgers;Get Lucky (Radio Edit - feat. Pharrell Williams and Nile Rodgers);https://soundcloud.com/daftpunkofficialmusic/get-lucky-radio-edit;94;автоматически выбран;исходный;лучший из 2 похожих
+12;Сплин;Выхода нет;Выхода нет;Сплин;Выхода нет;https://soundcloud.com/splin-band/vykhoda-net;100;автоматически выбран;исходный;лучший из 2 похожих
+13;Macan;ASPHALT 8;ASPHALT 8;MACAN;ASPHALT 8;https://soundcloud.com/macan-sc/asphalt-8;100;автоматически выбран;исходный;лучший из 4 похожих
+14;Linkin Park;Numb [Official Music Video];Numb;Linkin Park;Numb;https://soundcloud.com/linkinpark/numb;100;автоматически выбран;очищенный;уверенное совпадение
+15;Tiësto;The Business;The Business;Tiësto;The Business;https://soundcloud.com/tiesto/the-business-1;100;автоматически выбран;исходный;уверенное совпадение
+16;Мумий Тролль;Владивосток 2000;Владивосток 2000;Мумий Тролль;Владивосток 2000;https://soundcloud.com/mumiytroll-music/vladivostok-2000-vladivostok;100;автоматически выбран;транслит;уверенное совпадение
+17;Avicii;Wake Me Up (Slowed + Reverb);Wake Me Up Slowed + Reverb;Ineegees;Avicii - Wake Me Up (Slowed);https://soundcloud.com/inee01/avicii-wake-me-up-slowed;100;автоматически выбран;исходный;лучший из 7 похожих

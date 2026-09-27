@@ -88,10 +88,31 @@ def test_utf16_file(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "title", ["320", "~128", "~192", "256 kbps", "128kbps", "~320 KBPS", " 320 ", "~ 128", "320 кбит/с", "192 kbit/s"]
+    "title", ["~128", "~192", "256 kbps", "128kbps", "~320 KBPS", "~ 128", "320 кбит/с", "192 kbit/s"]
 )
-def test_bitrate_titles_are_broken(title):
+def test_explicit_bitrate_titles_are_always_broken(title):
     assert Track("@ФакШиза", title).broken_title
+
+
+@pytest.mark.parametrize("title", ["320", " 320 ", "128"])
+def test_plain_number_is_bitrate_only_in_context(title):
+    # Одиночное «Artist — 320» может быть настоящей песней.
+    assert not Track("Artist", title).broken_title
+    assert Track("Artist", title, bitrate_context=True).broken_title
+
+
+def test_read_tracks_sets_bitrate_context(tmp_path):
+    f = tmp_path / "tracks.txt"
+    f.write_text("Artist — 320\nImagine Dragons — Believer\n", encoding="utf-8")
+    tracks, _ = read_tracks(f)
+    assert not tracks[0].broken_title  # без контекста — обычное название
+    f.write_text("Artist — 320\nOther — ~128\nImagine Dragons — Believer\n", encoding="utf-8")
+    tracks, _ = read_tracks(f)
+    assert tracks[0].broken_title and tracks[1].broken_title and not tracks[2].broken_title
+    f.write_text("Artist — 320\nOther — 256\nImagine Dragons — Believer\n", encoding="utf-8")
+    tracks, _ = read_tracks(f)
+    assert tracks[0].broken_title and tracks[1].broken_title  # два голых битрейта — тоже баг экспорта
+    assert tracks[0] == Track("Artist", "320", None, 1)  # контекст не влияет на сравнение
 
 
 @pytest.mark.parametrize("title", ["22", "505", "99", "911", "1979", "Believer", "320 Degrees", "~ночь", ""])

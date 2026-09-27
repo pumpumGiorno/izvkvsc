@@ -1,4 +1,10 @@
-"""Точка входа: python -m vk2sc [--dry-run] [--tracks tracks.txt] ..."""
+"""Точка входа: python -m vk2sc [--yes] [--dry-run] [--tracks tracks.txt] ...
+
+По умолчанию всё решается автоматически: программа сама пробует несколько
+поисковых запросов, сама выбирает лучшего кандидата и пропускает сомнительные
+треки. Единственный вопрос — подтверждение перед изменением плейлиста
+(его снимает --yes). Старый ручной выбор кандидатов — флаг --interactive.
+"""
 
 from __future__ import annotations
 
@@ -12,13 +18,23 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import report
-from .matching import AUTO_THRESHOLD, Candidate, Decision, Scored, decide, rank, score_candidate
+from .matching import (
+    AUTO_THRESHOLD,
+    MATCHING_VERSION,
+    Candidate,
+    Decision,
+    Scored,
+    auto_pick,
+    decide,
+    rank,
+    score_candidate,
+)
 from .normalize import (
     clean_artist_for_query,
-    clean_title_for_query,
     fold,
     has_cyrillic,
     parse_artist,
+    search_title,
     simplify,
     translit,
 )
@@ -31,8 +47,20 @@ from .soundcloud import (
     SoundCloudError,
     playlist_track_count,
 )
-from .state import AUTO, BROKEN, DECIDED, MANUAL, MATCHED, NOT_FOUND, PENDING, SKIPPED, State, StateError
-from .tracks import Track, TracksFileError, format_duration, read_tracks, track_keys
+from .state import (
+    AUTO,
+    AUTOMATIC,
+    BROKEN,
+    LOW,
+    MANUAL,
+    MATCHED,
+    NOT_FOUND,
+    PENDING,
+    SKIPPED,
+    State,
+    StateError,
+)
+from .tracks import Track, TracksFileError, bitrate_title_kind, format_duration, read_tracks, track_keys
 
 log = logging.getLogger("vk2sc")
 
@@ -40,28 +68,48 @@ DEFAULT_TITLE = "Из VK"
 PLAYLIST_LIMIT = 500  # лимит SoundCloud на число треков в плейлисте
 SHOW_CANDIDATES = 5
 KEEP_CANDIDATES = 10
+MAX_QUERIES = 5  # поисковых запросов на один трек, не больше
 YES = {"y", "yes", "д", "да"}
+
+# Варианты поискового запроса (подписи идут в лог и в report.csv).
+V_ORIGINAL = "исходный"
+V_CLEAN = "очищенный"
+V_NO_YO = "без ё"
+V_TRANSLIT = "транслит"
+V_MAIN_ARTIST = "основной исполнитель"
+V_TITLE_ARTIST = "название + исполнитель"
+V_TITLE_ONLY = "только название"
+ALT_SPELLINGS = (V_NO_YO, V_TRANSLIT)
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m vk2sc",
-        description="Ищет треки из списка VK в SoundCloud и собирает из них новый плейлист.",
+        description="Ищет треки из списка VK в SoundCloud и собирает из них новый плейлист. "
+                    "Совпадения выбираются автоматически, сомнительные треки пропускаются.",
     )
     p.add_argument("--tracks", type=Path, default=Path("tracks.txt"), help="файл со списком (по умолчанию tracks.txt)")
     p.add_argument("--dry-run", action="store_true", help="только поиск и отчёт: плейлист не создаётся, токен не нужен")
-    p.add_argument("--title", help=f"название плейлиста (иначе спросит при запуске, по умолчанию «{DEFAULT_TITLE}»)")
+    p.add_argument("-y", "--yes", action="store_true",
+                   help="не спрашивать подтверждения перед созданием/изменением плейлиста")
+    p.add_argument("--title", help=f"название плейлиста (по умолчанию «{DEFAULT_TITLE}»)")
     p.add_argument("--public", action="store_true", help="сделать плейлист публичным (по умолчанию приватный)")
+    p.add_argument("--interactive", action="store_true",
+                   help="старый режим: спрашивать выбор кандидата, если совпадение сомнительное")
     p.add_argument("--no-input", action="store_true",
-                   help="ничего не спрашивать: сомнительные треки откладываются до следующего запуска")
-    p.add_argument("--review", action="store_true", help="заново предложить выбор для пропущенных и ненайденных")
+                   help="ничего не спрашивать; плейлист меняется только вместе с --yes")
+    p.add_argument("--review", action="store_true",
+                   help="вместе с --interactive: заново предложить выбор для пропущенных и ненайденных")
+    p.add_argument("--rematch", action="store_true",
+                   help="пересчитать автоматические совпадения, найденные прошлой версией алгоритма "
+                        "(ручной выбор не трогается)")
     p.add_argument("--threshold", type=int, default=AUTO_THRESHOLD,
                    help=f"порог уверенности для автодобавления, 0–100 (по умолчанию {AUTO_THRESHOLD})")
     p.add_argument("--delay", type=float, default=None,
                    help="пауза между запросами, сек (по умолчанию 1.5, минимум 1)")
     p.add_argument("--state", type=Path, default=Path("state.json"), help="файл прогресса (по умолчанию state.json)")
     p.add_argument("--report", type=Path, default=Path("report.csv"), help="файл отчёта (по умолчанию report.csv)")
-    p.add_argument("-v", "--verbose", action="store_true", help="подробный вывод")
+    p.add_argument("-v", "--verbose", action="store_true", help="подробный вывод: все кандидаты и их оценки")
     return p
 
 
@@ -86,21 +134,54 @@ def setup_logging(verbose: bool, log_path: Path = Path("vk2sc.log")) -> None:
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
+def query_key(query: str) -> str:
+    """Для отсева повторов. Не simplify(): «Ёлка» и «Елка» SoundCloud ищет по-разному."""
+    return " ".join(query.lower().split())
+
+
+def search_variants(track: Track) -> list[tuple[str, str]]:
+    """Каскад поисковых запросов от точного к широкому, без повторов, не больше MAX_QUERIES.
+
+    1. исходный: исполнитель и название как в tracks.txt;
+    2. очищенный: без «(VK.COM)», «(Official Audio)», feat.-гостей;
+    3. то же без «ё» или в транслите (для кириллицы);
+    4. первый из нескольких исполнителей + название;
+    5. название + исполнитель;
+    6. только название (результаты всё равно сверяются с исполнителем).
+    Запроса по одному исполнителю нет: при пустом названии результат был бы случайным.
+    """
+    raw = " ".join(f"{track.artist} {track.title}".split())
+    artist = clean_artist_for_query(track.artist) or " ".join(track.artist.split())
+    title = search_title(track.title)
+    clean = f"{artist} {title}".strip()
+    variants = [(V_ORIGINAL, raw), (V_CLEAN, clean)]
+    if "ё" in clean.lower():
+        variants.append((V_NO_YO, clean.replace("ё", "е").replace("Ё", "Е")))
+    elif has_cyrillic(fold(clean)):
+        variants.append((V_TRANSLIT, translit(simplify(clean))))
+    names = parse_artist(artist).names
+    if len(names) > 1:
+        variants.append((V_MAIN_ARTIST, f"{names[0]} {title}"))
+    variants.append((V_TITLE_ARTIST, f"{title} {artist}"))
+    core = simplify(title)
+    if len(core) >= 3 and not core.replace(" ", "").isdigit():
+        variants.append((V_TITLE_ONLY, title))
+
+    unique: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for label, q in variants:
+        key = query_key(q)
+        if key and key not in seen:
+            seen.add(key)
+            unique.append((label, q))
+    # Перестановка слов даёт в SoundCloud почти те же результаты — её жертвуем первой.
+    while len(unique) > MAX_QUERIES and any(label == V_TITLE_ARTIST for label, _ in unique):
+        unique = [v for v in unique if v[0] != V_TITLE_ARTIST]
+    return unique[:MAX_QUERIES]
+
+
 def build_queries(track: Track) -> list[str]:
-    """Основной запрос и, если есть смысл, один запасной."""
-    artist = clean_artist_for_query(track.artist)
-    title = clean_title_for_query(track.title) or track.title.strip()
-    main = f"{artist} {title}".strip()
-    alt = None
-    if "ё" in main.lower():
-        alt = main.replace("ё", "е").replace("Ё", "Е")
-    elif has_cyrillic(fold(main)):
-        alt = translit(simplify(main))
-    else:
-        names = parse_artist(artist).names
-        if len(names) > 1:
-            alt = f"{names[0]} {title}"
-    return [main] + ([alt] if alt and alt != main else [])
+    return [q for _, q in search_variants(track)]
 
 
 class Runner:
@@ -112,7 +193,10 @@ class Runner:
         self.keys = track_keys(tracks)
         self.state = state
         self.client = client
+        # interactive — можно ли вообще задавать вопросы (терминал, нет --no-input);
+        # manual — спрашивать выбор кандидатов (только с --interactive).
         self.interactive = interactive
+        self.manual = interactive and bool(getattr(args, "interactive", False))
         self.input = input_fn
         self.out = out
         self.search_count = 0
@@ -121,8 +205,8 @@ class Runner:
 
     def run(self) -> int:
         code = 0
-        log.info("=== Запуск: треков %d, dry-run=%s, интерактивно=%s ===",
-                 len(self.tracks), self.args.dry_run, self.interactive)
+        log.info("=== Запуск: треков %d, dry-run=%s, ручной выбор=%s, алгоритм v%d ===",
+                 len(self.tracks), self.args.dry_run, self.manual, MATCHING_VERSION)
         try:
             self.choose_title()
             self.match_all()
@@ -167,9 +251,9 @@ class Runner:
         if self.args.title:
             st.playlist_title = self.args.title
             st.save()
-        elif not st.playlist_title and self.interactive and not self.args.dry_run:
-            # В --dry-run не спрашиваем и ничего не запоминаем: иначе при настоящем
-            # запуске вопрос о названии уже не прозвучит.
+        elif not st.playlist_title and self.manual and not self.args.dry_run:
+            # Спрашиваем только в --interactive. В --dry-run не спрашиваем и ничего не
+            # запоминаем: иначе при настоящем запуске вопрос о названии уже не прозвучит.
             answer = self.input(f"Название нового плейлиста [{DEFAULT_TITLE}]: ").strip()
             st.playlist_title = answer or DEFAULT_TITLE
             st.save()
@@ -177,15 +261,31 @@ class Runner:
     # ---------- поиск и сопоставление ----------
 
     def needs_work(self, entry: Optional[dict], track: Optional[Track] = None) -> bool:
+        review = self.args.review and self.manual
         if track is not None and track.broken_title:
             # Перекрываем старые автоматические записи: раньше такой трек мог «найтись» случайно.
             # Ручной выбор не трогаем — это могла быть настоящая песня «128».
             if entry is None or entry["status"] not in (BROKEN, MANUAL):
                 return True
-            return entry["status"] == BROKEN and self.args.review and self.interactive
-        if entry is None or entry["status"] == PENDING:
+            return entry["status"] == BROKEN and review
+        if entry is None:
             return True
-        return self.args.review and self.interactive and entry["status"] in (SKIPPED, NOT_FOUND)
+        status = entry["status"]
+        if status in (PENDING, BROKEN):
+            # PENDING — отложенный ручной выбор из старых версий; BROKEN — трек, который
+            # больше не считается битым (одиночное «Artist — 320»).
+            return True
+        if review and status in (SKIPPED, NOT_FOUND, LOW):
+            return True
+        if entry.get("algo", 1) < MATCHING_VERSION and status in AUTOMATIC:
+            # Новая версия могла бы найти то, что не нашла старая. Найденное раньше
+            # пересчитываем только по --rematch: повторять поиск без нужды незачем.
+            # Исключение — название-число («Artist — 320»): старые версии могли
+            # «найти» такой трек по одному исполнителю.
+            if status == AUTO and track is not None and bitrate_title_kind(track.title):
+                return True
+            return status != AUTO or self.args.rematch
+        return False
 
     def match_all(self) -> None:
         todo = [i for i, k in enumerate(self.keys) if self.needs_work(self.state.get(k), self.tracks[i])]
@@ -198,13 +298,13 @@ class Runner:
             )
         broken_todo = sum(1 for i in todo if self.tracks[i].broken_title)
         fresh = sum(1 for i in todo if self.state.get(self.keys[i]) is None and not self.tracks[i].broken_title)
-        waiting = len(todo) - fresh - broken_todo
+        again = len(todo) - fresh - broken_todo
         self.out(
             f"Треков в списке: {len(self.tracks)}. Решено раньше: {len(self.tracks) - len(todo)}. "
-            f"Искать впервые: {fresh}." + (f" Ждут выбора (из кэша, без нового поиска): {waiting}." if waiting else "")
+            f"Искать впервые: {fresh}." + (f" Перепроверить: {again}." if again else "")
         )
-        if todo and not self.interactive:
-            self.out("Работаю без вопросов: сомнительные совпадения отложу до запуска в интерактивном режиме.")
+        if todo and not self.manual:
+            self.out("Режим: автоматический выбор. Сомнительные совпадения пропускаются и попадают в отчёт.")
         for i in todo:
             self.match_one(i)
 
@@ -215,7 +315,7 @@ class Runner:
 
         if track.broken_title:
             # Не ищем ни по названию-битрейту, ни по одному исполнителю: результат был бы случайным.
-            if entry and entry["status"] == BROKEN and self.args.review and self.interactive:
+            if entry and entry["status"] == BROKEN and self.args.review and self.manual:
                 self.out("  Название похоже на битрейт, автоматически не ищу. Если это настоящее название, найдите трек сами.")
                 status, chosen, ranked = self.ask(track, Decision("none", []), [], skip_status=BROKEN)
                 self.save(key, track, status, chosen, ranked, [])
@@ -224,47 +324,97 @@ class Runner:
             self.save(key, track, BROKEN, None, [], [])
             return
 
-        if entry and entry.get("candidates") is not None:
-            # Уже искали: берём кэш, повторно в SoundCloud не ходим.
-            candidates = [Candidate.from_dict(c) for c in entry["candidates"]]
+        cached: list[Candidate] = []
+        queries: list[str] = []
+        online = True
+        if entry and entry.get("candidates") is not None and entry["status"] != BROKEN:
+            # Уже искали: берём кэш. Если он от текущей версии алгоритма — в SoundCloud
+            # не ходим вовсе, от старой — добираем только новые варианты запроса.
+            cached = [Candidate.from_dict(c) for c in entry["candidates"]]
             queries = list(entry.get("queries", []))
-        else:
-            candidates, queries = self.search(track)
+            online = entry.get("algo", 1) < MATCHING_VERSION
+            self.out("  результаты прошлого поиска взяты из state.json")
+        candidates, queries = self.search(track, cached, queries, online)
         ranked = rank(track, candidates)
-        decision = decide(track, ranked, self.args.threshold)
 
-        if decision.kind == "auto":
-            best = decision.best
-            self.out(f"  ✓ {report.describe(best.candidate)} — {best.score}%")
-            self.save(key, track, AUTO, best, ranked, queries)
-        elif not self.interactive:
-            if decision.kind == "ask":
-                self.out(f"  ? отложено: {decision.reason}, лучший вариант {decision.best.score}%")
-                self.save(key, track, PENDING, None, ranked, queries)
+        if self.manual:
+            decision = decide(track, ranked, self.args.threshold)
+            if decision.kind == "auto":
+                self.report_choice(decision.best, decision)
+                self.save(key, track, AUTO, decision.best, ranked, queries, decision.reason)
             else:
-                self.out("  ✗ не найдено")
-                self.save(key, track, NOT_FOUND, None, ranked, queries)
-        else:
-            status, chosen, ranked = self.ask(track, decision, queries)
-            self.save(key, track, status, chosen, ranked, queries)
+                status, chosen, ranked = self.ask(track, decision, queries)
+                self.save(key, track, status, chosen, ranked, queries, decision.reason)
+            return
 
-    def search(self, track: Track) -> tuple[list[Candidate], list[str]]:
-        collected: list[Candidate] = []
-        used: list[str] = []
-        for q in build_queries(track):
+        decision = auto_pick(track, ranked, self.args.threshold)
+        self.show_verbose(decision.ranked)
+        if decision.kind == "auto":
+            self.report_choice(decision.best, decision)
+            self.save(key, track, AUTO, decision.best, decision.ranked, queries, decision.reason)
+        elif decision.kind == "low":
+            best = decision.best
+            self.out(f"  лучший вариант: {report.describe(best.candidate)}, score {best.score}")
+            self.out(f"  → пропущен: низкая уверенность ({decision.reason})")
+            self.save(key, track, LOW, None, decision.ranked, queries, decision.reason)
+        else:
+            self.out("  → не найден")
+            self.save(key, track, NOT_FOUND, None, decision.ranked, queries, decision.reason)
+
+    def report_choice(self, best: Scored, decision: Decision) -> None:
+        self.out(f"  найдено: {report.describe(best.candidate)}")
+        self.out(f"  score: {best.score}")
+        note = f" ({decision.reason})" if decision.reason and decision.reason != "уверенное совпадение" else ""
+        self.out(f"  → автоматически выбран{note}")
+
+    def show_verbose(self, ranked: list[Scored]) -> None:
+        if not self.args.verbose or not ranked:
+            return
+        self.out("  кандидаты:")
+        self.show(ranked[:SHOW_CANDIDATES])
+
+    def good_enough(self, track: Track, collected: list[Candidate], remaining: list[tuple[str, str]]) -> bool:
+        """Хватит ли уже найденного, чтобы больше не искать."""
+        if not collected:
+            return False
+        decision = auto_pick(track, rank(track, collected), self.args.threshold)
+        if decision.kind != "auto" or decision.best.score < self.args.threshold:
+            return False
+        # Перезаливку от случайного пользователя считаем достаточной, только если
+        # другое написание (транслит, без «ё») не нашло загрузку с аккаунта исполнителя.
+        return decision.best.uploader_match or not any(label in ALT_SPELLINGS for label, _ in remaining)
+
+    def search(self, track: Track, collected: list[Candidate], used: list[str],
+               online: bool = True) -> tuple[list[Candidate], list[str]]:
+        collected, used = list(collected), list(used)
+        done = {query_key(q) for q in used}
+        todo = [(label, q) for label, q in search_variants(track) if query_key(q) not in done]
+        if not online or self.good_enough(track, collected, todo):
+            return collected, used
+        searched = 0
+        while todo and len(used) < MAX_QUERIES:
+            label, q = todo.pop(0)
+            if searched == 0 and not used:
+                self.out(f"  поиск: {q}")
+            else:
+                self.out(f"  повторный поиск ({label}): {q}")
             used.append(q)
-            log.debug("Поиск: %s", q)
-            collected += [Candidate.from_api(t) for t in self.client.search_tracks(q)]
+            log.debug("Поиск [%s]: %s", label, q)
+            found = [Candidate.from_api(t) for t in self.client.search_tracks(q)]
+            for c in found:
+                c.variant = label
+            collected += found
             self.search_count += 1
-            decision = decide(track, rank(track, collected), self.args.threshold)
-            # Перезаливку от случайного пользователя считаем достаточной, только если
-            # запасной запрос (транслит, без «ё») не нашёл загрузку с аккаунта исполнителя.
-            if decision.kind == "auto" and decision.best.uploader_match:
+            searched += 1
+            if self.good_enough(track, collected, todo):
                 break
+            if todo and len(used) < MAX_QUERIES:
+                viable = auto_pick(track, rank(track, collected), self.args.threshold).kind != "none"
+                self.out("  результат недостаточно хороший" if viable else "  ничего подходящего")
         return collected, used
 
     def save(self, key: str, track: Track, status: str, chosen: Optional[Scored],
-             ranked: list[Scored], queries: list[str]) -> None:
+             ranked: list[Scored], queries: list[str], reason: str = "") -> None:
         match = None
         if chosen is not None:
             match = chosen.candidate.to_dict()
@@ -281,9 +431,11 @@ class Runner:
             "match": match,
             "candidates": candidates,
             "queries": queries,
+            "reason": reason,
+            "algo": MATCHING_VERSION,
         })
 
-    # ---------- диалог ----------
+    # ---------- диалог (только --interactive) ----------
 
     def show(self, shown: list[Scored]) -> None:
         for n, s in enumerate(shown, 1):
@@ -319,11 +471,15 @@ class Runner:
                 if not data or data.get("kind") != "track":
                     self.out("  По этой ссылке трек не найден.")
                     continue
-                chosen = score_candidate(track, Candidate.from_api(data))
+                cand = Candidate.from_api(data)
+                cand.variant = "ваша ссылка"
+                chosen = score_candidate(track, cand)
                 self.out(f"  → выбран по ссылке: {chosen.candidate.display}")
                 return MANUAL, chosen, [chosen] + [s for s in ranked if s.candidate.id != chosen.candidate.id]
             queries.append(answer)
             found = [Candidate.from_api(t) for t in self.client.search_tracks(answer)]
+            for c in found:
+                c.variant = "ваш запрос"
             self.search_count += 1
             if not found:
                 self.out("  По этому запросу ничего нет. Попробуйте другой или нажмите Enter.")
@@ -358,7 +514,7 @@ class Runner:
         ids, _ = self.desired_ids()
         pending = sum(1 for k in self.keys if (self.state.get(k) or {}).get("status") == PENDING)
         if pending:
-            self.out(f"\n{pending} трек(ов) ждут ручного выбора — их можно добрать позже, запустив скрипт без --no-input.")
+            self.out(f"\n{pending} трек(ов) ждут ручного выбора — выберите их в режиме --interactive.")
         if not ids:
             self.out("\nНе найдено ни одного трека для плейлиста.")
             return 0
@@ -397,10 +553,12 @@ class Runner:
             else:
                 before = len(self.state.playlists[k].get("track_ids") or [])
                 self.out(f"  • обновить свой плейлист «{name}» — было {before}, станет {len(chunk)} треков")
-        if not self.interactive:
-            self.out("Без подтверждения ничего не создаю. Запустите без --no-input в терминале.")
+        if self.args.yes:
+            self.out("Подтверждено флагом --yes.")
+        elif not self.interactive:
+            self.out("Без подтверждения ничего не создаю. Запустите с --yes (или в терминале без --no-input).")
             return 1
-        if self.input("Продолжить? [y/N]: ").strip().lower() not in YES:
+        elif self.input("Продолжить? [y/N]: ").strip().lower() not in YES:
             self.out("Отменено, в аккаунте ничего не изменилось.")
             return 0
 
@@ -420,7 +578,9 @@ class Runner:
                     data = self.client.set_playlist_tracks(pl["id"], chunk)
                 except PlaylistNotFound:
                     self.out(f"Плейлист «{pl['title']}» не найден в аккаунте — видимо, его удалили на сайте.")
-                    if self.input("Создать его заново? [y/N]: ").strip().lower() not in YES:
+                    if self.args.yes:
+                        self.out("Создаю его заново (--yes).")
+                    elif not self.interactive or self.input("Создать его заново? [y/N]: ").strip().lower() not in YES:
                         self.out("Пропускаю. Остальные изменения сохранены.")
                         continue
                     data = self.client.create_playlist(pl["title"], chunk, sharing)
@@ -504,8 +664,13 @@ def main(argv: Optional[list[str]] = None, client: Optional[SoundCloudClient] = 
 
     if interactive is None:
         interactive = not args.no_input and sys.stdin.isatty()
-    if args.review and not interactive:
-        out("--review работает только в интерактивном режиме.")
+    elif args.no_input:
+        interactive = False
+    if args.interactive and not interactive:
+        out("--interactive нужен терминал для ответов (и несовместим с --no-input).")
+        return 1
+    if args.review and not args.interactive:
+        out("--review работает только вместе с --interactive.")
         return 1
     if not 0 <= args.threshold <= 100:
         out("--threshold должен быть от 0 до 100.")

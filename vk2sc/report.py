@@ -8,10 +8,35 @@ from pathlib import Path
 from typing import Optional
 
 from .matching import Candidate
-from .state import AUTO, BROKEN, MANUAL, NOT_FOUND, PENDING, SKIPPED, State
+from .normalize import search_title
+from .state import AUTO, BROKEN, LOW, MANUAL, NOT_FOUND, PENDING, SKIPPED, State
 from .tracks import Track, format_duration
 
-HEADER = ["Трек из VK", "Найдено в SoundCloud", "Ссылка", "Уверенность", "Статус"]
+HEADER = [
+    "line",
+    "original_artist",
+    "original_title",
+    "search_title",
+    "matched_artist",
+    "matched_title",
+    "soundcloud_url",
+    "score",
+    "status",
+    "search_variant",
+    "note",
+]
+
+# Статусы в отчёте
+ST_ADDED = "добавлен"
+ST_AUTO = "автоматически выбран"
+ST_MANUAL = "выбран вручную"
+ST_NOT_FOUND = "не найден"
+ST_LOW = "пропущен: низкая уверенность"
+ST_SKIPPED = "пропущен"
+ST_PENDING = "ждёт ручного выбора"
+ST_BROKEN = "битое название"
+ST_DUPLICATE = "дубликат"
+ST_UNPROCESSED = "не обработан"
 
 
 @dataclass
@@ -21,6 +46,7 @@ class Summary:
     manual: int = 0
     added: int = 0  # реально лежит в плейлистах
     skipped: int = 0
+    low: int = 0
     not_found: int = 0
     pending: int = 0
     broken: int = 0
@@ -43,20 +69,22 @@ def build(tracks: list[Track], keys: list[str], state: State, dry_run: bool,
     s = Summary(total=len(tracks))
     for track, key in zip(tracks, keys):
         e = state.get(key)
-        found = url = conf = ""
+        shown: Optional[Candidate] = None
+        score = ""
+        notes: list[str] = []
         if e is None:
-            status = "не обработан"
+            status = ST_UNPROCESSED
             s.unprocessed += 1
         else:
             match: Optional[dict] = e.get("match")
             best = match or (e.get("candidates") or [None])[0]
-            if best and e["status"] != NOT_FOUND:
-                c = Candidate.from_dict(best)
-                found, url = describe(c), c.url
-                conf = f"{best.get('score', '')}"
             st = e["status"]
+            if best and st not in (NOT_FOUND, BROKEN):
+                shown = Candidate.from_dict(best)
+                score = f"{best.get('score', '')}"
             if key in duplicates:
-                status = "дубликат (уже есть в плейлисте)"
+                status = ST_DUPLICATE
+                notes.append("этот трек уже есть в плейлисте выше по списку")
                 s.duplicates += 1
             elif st in (AUTO, MANUAL):
                 s.matched += 1
@@ -64,24 +92,48 @@ def build(tracks: list[Track], keys: list[str], state: State, dry_run: bool,
                 s.added += is_added
                 if st == MANUAL:
                     s.manual += 1
-                    status = "выбран вручную" if is_added or dry_run else "выбран вручную, не добавлен"
+                if is_added:
+                    status = ST_ADDED
+                    if st == MANUAL:
+                        notes.append("выбран вручную")
                 else:
-                    status = "добавлен" if is_added else ("будет добавлен" if dry_run else "найден, не добавлен")
+                    status = ST_MANUAL if st == MANUAL else ST_AUTO
+                    if not dry_run:
+                        notes.append("не добавлен в плейлист")
+            elif st == LOW:
+                status = ST_LOW
+                s.low += 1
             elif st == SKIPPED:
-                status = "пропущен"
+                status = ST_SKIPPED
                 s.skipped += 1
             elif st == NOT_FOUND:
-                status = "не найден"
+                status = ST_NOT_FOUND
                 s.not_found += 1
             elif st == PENDING:
-                status = "ждёт ручного выбора"
+                status = ST_PENDING
                 s.pending += 1
             elif st == BROKEN:
-                status = "битое название"
+                status = ST_BROKEN
+                notes.append("вместо названия битрейт — исправьте строку в tracks.txt")
                 s.broken += 1
             else:
                 status = st
-        s.rows.append([track.display, found, url, conf, status])
+            reason = e.get("reason")
+            if reason and st in (AUTO, LOW, NOT_FOUND) and key not in duplicates:
+                notes.insert(0, reason)
+        s.rows.append([
+            track.line_no or "",
+            track.artist,
+            track.title,
+            "" if track.broken_title else search_title(track.title),
+            shown.artist if shown else "",
+            shown.title if shown else "",
+            shown.url if shown else "",
+            score,
+            status,
+            (shown.variant or "") if shown else "",
+            "; ".join(notes),
+        ])
     return s
 
 
@@ -108,7 +160,9 @@ def print_summary(summary: Summary, dry_run: bool, report_path: Path, out=print)
     out(f"{label + ':':<23}{count}{extra}")
     if not dry_run and summary.matched > summary.added:
         out(f"Найдено, но не добавлено: {summary.matched - summary.added}")
-    out(f"Пропущено:             {summary.skipped}")
+    out(f"Низкая уверенность:    {summary.low}")
+    if summary.skipped:
+        out(f"Пропущено вручную:     {summary.skipped}")
     out(f"Не найдено:            {summary.not_found}")
     if summary.pending:
         out(f"Ждут ручного выбора:   {summary.pending}")
