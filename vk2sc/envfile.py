@@ -72,8 +72,24 @@ def load_env() -> Optional[Path]:
     return None
 
 
+def _filled_example() -> Optional[Path]:
+    """.env.example, в который вписан токен (частая путаница: программа читает только .env)."""
+    for p in env_candidates():
+        example = p.parent / ".env.example"
+        try:
+            if example.is_file() and parse(read_text(example)).get(TOKEN_KEY, "").strip():
+                return example
+        except (OSError, UnicodeDecodeError):
+            continue
+    return None
+
+
 def diagnose_token() -> str:
     """Почему токен не прочитался — одной-двумя фразами, без значения токена."""
+    example = _filled_example()
+    if example is not None:
+        return (f"Токен вписан в {example.name}, а программа читает только .env. "
+                f"Перенесите файл с токеном на место .env: Move-Item \"{example}\" \"{example.parent / '.env'}\" -Force")
     env = next((p for p in env_candidates() if p.is_file()), None)
     if env is None:
         folder = env_candidates()[0].parent

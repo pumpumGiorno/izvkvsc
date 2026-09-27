@@ -97,3 +97,14 @@ def test_cli_explains_missing_token(folder):
     code = main(["--yes"], client=FakeClient(), interactive=False, out=lambda *a: lines.append(" ".join(map(str, a))))
     out = "\n".join(lines)
     assert code == 1 and "на отдельной строке" in out and TOKEN not in out
+
+
+def test_diagnose_token_pasted_into_example(folder):
+    """Реальный случай: .env — нетронутый шаблон, а токен вписан в .env.example."""
+    template = "# шаблон\r\nSOUNDCLOUD_OAUTH_TOKEN=\r\n\r\nREQUEST_DELAY=1.5\r\n"
+    (folder / ".env").write_text(template, encoding="utf-8", newline="")
+    (folder / ".env.example").write_text(template.replace("TOKEN=", f"TOKEN={TOKEN}"), encoding="utf-8", newline="")
+    load_env()
+    assert not os.environ.get(TOKEN_KEY)
+    message = diagnose_token()
+    assert ".env.example" in message and "Move-Item" in message and TOKEN not in message
